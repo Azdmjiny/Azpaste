@@ -1,6 +1,7 @@
 # Azpaste Screenshot
 
 一个轻量的 macOS 截屏小工具。
+A screenshot app for macOS.
 
 ## 功能
 
