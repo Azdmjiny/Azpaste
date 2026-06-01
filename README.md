@@ -1,4 +1,4 @@
-# Azpaste Screenshot
+# Azpaste
 
 一个轻量的 macOS 截屏小工具。
 A screenshot app for macOS.
@@ -23,7 +23,7 @@ make app
 生成的应用在：
 
 ```text
-build/Azpaste Screenshot.app
+build/Azpaste.app
 ```
 
 ## 运行
@@ -46,4 +46,4 @@ make app CODE_SIGN_IDENTITY="Developer ID Application: Your Name"
 系统设置 > 隐私与安全性 > 屏幕录制
 ```
 
-给 `Azpaste Screenshot` 打开权限。
+给 `Azpaste` 打开权限。

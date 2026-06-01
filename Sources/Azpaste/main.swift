@@ -186,6 +186,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private static let hotKeyCodeKey = "hotKeyCode"
     private static let hotKeyModifiersKey = "hotKeyModifiers"
     private static let screenCapturePermissionRequestedKey = "screenCapturePermissionRequested"
+    private static let defaultsMigrationKey = "didMigrateDefaultsFromAzpasteScreenshot"
+    private static let oldDefaultsSuiteName = "com.azpaste.screenshot"
     private static let hotKeyID = UInt32(1)
     private static let defaultHotKeyCode = UInt32(kVK_ANSI_A)
     private static let defaultHotKeyModifiers = UInt32(controlKey | optionKey | cmdKey)
@@ -263,7 +265,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        NSApp.setActivationPolicy(.regular)
+        migrateDefaultsIfNeeded()
+        NSApp.setActivationPolicy(.accessory)
+        buildApplicationMenu()
         createOutputDirectory()
         buildWindow()
         buildStatusItem()
@@ -293,12 +297,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    private func buildApplicationMenu() {
+        let mainMenu = NSMenu()
+        let appMenuItem = NSMenuItem()
+        mainMenu.addItem(appMenuItem)
+
+        let appMenu = NSMenu()
+        let quitItem = NSMenuItem(title: "退出 Azpaste", action: #selector(quitApp), keyEquivalent: "q")
+        quitItem.target = self
+        appMenu.addItem(quitItem)
+
+        appMenuItem.submenu = appMenu
+        NSApp.mainMenu = mainMenu
+    }
+
     private func buildWindow() {
         let contentView = NSView(frame: NSRect(x: 0, y: 0, width: 420, height: 474))
         contentView.wantsLayer = true
         contentView.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
 
-        let title = NSTextField(labelWithString: "Azpaste 截屏")
+        let title = NSTextField(labelWithString: "Azpaste")
         title.font = .systemFont(ofSize: 26, weight: .semibold)
         title.textColor = .labelColor
 
@@ -363,7 +381,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             backing: .buffered,
             defer: false
         )
-        window.title = "Azpaste 截屏"
+        window.title = "Azpaste"
         window.center()
         window.contentView = contentView
         window.isReleasedWhenClosed = false
@@ -380,20 +398,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard statusItem != nil else { return }
 
         let menu = NSMenu()
-        menu.addItem(NSMenuItem(title: "显示窗口", action: #selector(showWindow), keyEquivalent: ""))
-        menu.addItem(NSMenuItem(title: "选区截屏", action: #selector(captureSelection), keyEquivalent: ""))
-        menu.addItem(NSMenuItem(title: "打开录屏权限设置", action: #selector(openScreenCapturePrivacySettings), keyEquivalent: ""))
+        let showWindowItem = NSMenuItem(title: "显示窗口", action: #selector(showWindow), keyEquivalent: "")
+        showWindowItem.target = self
+        menu.addItem(showWindowItem)
+
+        let captureSelectionItem = NSMenuItem(title: "选区截屏", action: #selector(captureSelection), keyEquivalent: "")
+        captureSelectionItem.target = self
+        menu.addItem(captureSelectionItem)
+
+        let permissionItem = NSMenuItem(title: "打开录屏权限设置", action: #selector(openScreenCapturePrivacySettings), keyEquivalent: "")
+        permissionItem.target = self
+        menu.addItem(permissionItem)
 
         let hotKeyItem = NSMenuItem(
             title: isHotKeyEnabled ? "关闭快捷键截图（\(hotKeyDescription())）" : "开启快捷键截图（\(hotKeyDescription())）",
             action: #selector(toggleHotKeyFromMenu),
             keyEquivalent: ""
         )
+        hotKeyItem.target = self
         hotKeyItem.state = isHotKeyEnabled ? .on : .off
         menu.addItem(hotKeyItem)
 
         menu.addItem(.separator())
-        menu.addItem(NSMenuItem(title: "退出", action: #selector(quitApp), keyEquivalent: "q"))
+        let quitItem = NSMenuItem(title: "退出", action: #selector(quitApp), keyEquivalent: "q")
+        quitItem.target = self
+        menu.addItem(quitItem)
         statusItem.menu = menu
     }
 
@@ -501,7 +530,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func runCapture(mode: CaptureMode, description: String) {
         guard CGPreflightScreenCaptureAccess() else {
-            statusLabel.stringValue = "请在系统设置中允许 Azpaste Screenshot 录制屏幕"
+            statusLabel.stringValue = "请在系统设置中允许 Azpaste 录制屏幕"
             writeSelfTestResult("missing-permission")
             requestScreenCaptureAccessIfNeeded()
             if shouldQuitAfterCapture {
@@ -624,7 +653,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             guard let layer = info[kCGWindowLayer as String] as? Int,
                   layer == 0,
                   let ownerName = info[kCGWindowOwnerName as String] as? String,
-                  ownerName != "Azpaste Screenshot",
+                  ownerName != "Azpaste",
                   let boundsDictionary = info[kCGWindowBounds as String] as? [String: Any],
                   let windowNumber = info[kCGWindowNumber as String] as? UInt32 else {
                 continue
@@ -691,7 +720,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
 
-        statusLabel.stringValue = "首次使用前请允许 Azpaste Screenshot 录制屏幕"
+        statusLabel.stringValue = "首次使用前请允许 Azpaste 录制屏幕"
     }
 
     private func requestScreenCaptureAccessIfNeeded() {
@@ -699,6 +728,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         UserDefaults.standard.set(true, forKey: Self.screenCapturePermissionRequestedKey)
         CGRequestScreenCaptureAccess()
+    }
+
+    private func migrateDefaultsIfNeeded() {
+        let defaults = UserDefaults.standard
+        guard !defaults.bool(forKey: Self.defaultsMigrationKey),
+              let oldDefaults = UserDefaults(suiteName: Self.oldDefaultsSuiteName) else {
+            return
+        }
+
+        [
+            Self.outputDirectoryKey,
+            Self.hotKeyEnabledKey,
+            Self.hotKeyCodeKey,
+            Self.hotKeyModifiersKey,
+            Self.screenCapturePermissionRequestedKey
+        ].forEach { key in
+            guard defaults.object(forKey: key) == nil,
+                  let oldValue = oldDefaults.object(forKey: key) else {
+                return
+            }
+            defaults.set(oldValue, forKey: key)
+        }
+
+        defaults.set(true, forKey: Self.defaultsMigrationKey)
     }
 
     private func copyImageToPasteboard(_ url: URL) {

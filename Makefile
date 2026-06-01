@@ -1,20 +1,20 @@
-APP_NAME := Azpaste Screenshot
+APP_NAME := Azpaste
 BUILD_DIR := build
 APP_DIR := $(BUILD_DIR)/$(APP_NAME).app
 MACOS_DIR := $(APP_DIR)/Contents/MacOS
 RESOURCES_DIR := $(APP_DIR)/Contents/Resources
-BINARY := $(MACOS_DIR)/AzpasteScreenshot
+BINARY := $(MACOS_DIR)/Azpaste
 BUILD_STAMP := $(BUILD_DIR)/.app-built
-CODE_SIGN_KEYCHAIN := $(BUILD_DIR)/AzpasteSigning.keychain
+CODE_SIGN_KEYCHAIN := $(abspath $(BUILD_DIR)/AzpasteSigning.keychain)
 CODE_SIGN_IDENTITY ?= $(shell if [ -f "$(CODE_SIGN_KEYCHAIN)" ]; then echo AzpasteLocalCodeSigning; else echo -; fi)
 
 .PHONY: app run clean
 
 app: $(BUILD_STAMP)
 
-$(BUILD_STAMP): Sources/AzpasteScreenshot/main.swift Info.plist Makefile
+$(BUILD_STAMP): Sources/Azpaste/main.swift Info.plist Makefile
 	mkdir -p "$(MACOS_DIR)" "$(RESOURCES_DIR)" "$(BUILD_DIR)/ModuleCache"
-	swiftc Sources/AzpasteScreenshot/main.swift \
+	swiftc Sources/Azpaste/main.swift \
 		-o "$(BINARY)" \
 		-target arm64-apple-macos13.0 \
 		-module-cache-path "$(BUILD_DIR)/ModuleCache" \
