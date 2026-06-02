@@ -1,9 +1,9 @@
-APP_NAME := Azpaste
+APP_NAME := Azpaste Dev
 BUILD_DIR := build
 APP_DIR := $(BUILD_DIR)/$(APP_NAME).app
 MACOS_DIR := $(APP_DIR)/Contents/MacOS
 RESOURCES_DIR := $(APP_DIR)/Contents/Resources
-BINARY := $(MACOS_DIR)/Azpaste
+BINARY := $(MACOS_DIR)/AzpasteDev
 BUILD_STAMP := $(BUILD_DIR)/.app-built
 CODE_SIGN_KEYCHAIN := $(abspath $(BUILD_DIR)/AzpasteSigning.keychain)
 CODE_SIGN_IDENTITY ?= $(shell if [ -f "$(CODE_SIGN_KEYCHAIN)" ]; then echo AzpasteLocalCodeSigning; else echo -; fi)
@@ -35,7 +35,7 @@ $(BUILD_STAMP): Sources/Azpaste/main.swift Info.plist Makefile
 	touch "$(BUILD_STAMP)"
 
 run: app
-	open "$(APP_DIR)"
+	open -n "$(APP_DIR)"
 
 clean:
 	rm -rf "$(BUILD_DIR)"

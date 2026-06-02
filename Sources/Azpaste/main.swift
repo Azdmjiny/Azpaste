@@ -4,6 +4,12 @@ import Foundation
 import ImageIO
 import UniformTypeIdentifiers
 
+fileprivate enum AppIdentity {
+    static let appName = "Azpaste Dev"
+    static let bundleIdentifier = "com.azpaste.dev"
+    static let windowOwnerNamesToIgnore = Set(["Azpaste", appName])
+}
+
 enum CaptureResult {
     case success
     case failure(String)
@@ -548,7 +554,7 @@ final class CaptureOverlayView: NSView {
             guard let layer = info[kCGWindowLayer as String] as? Int,
                   layer == 0,
                   let ownerName = info[kCGWindowOwnerName as String] as? String,
-                  ownerName != "Azpaste",
+                  !AppIdentity.windowOwnerNamesToIgnore.contains(ownerName),
                   let boundsDictionary = info[kCGWindowBounds as String] as? [String: Any] else {
                 return nil
             }
@@ -774,6 +780,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         UInt32(UInt8(ascii: "P")) << 8 |
         UInt32(UInt8(ascii: "S"))
     )
+    private let defaults = UserDefaults(suiteName: AppIdentity.bundleIdentifier) ?? .standard
 
     private var window: NSWindow!
     private var statusItem: NSStatusItem!
@@ -797,25 +804,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private lazy var hotKeyButton = makeWideButton(title: "设置快捷键", action: #selector(beginHotKeyCapture))
     private var outputDirectory: URL {
         get {
-            if let savedPath = UserDefaults.standard.string(forKey: Self.outputDirectoryKey),
+            if let savedPath = defaults.string(forKey: Self.outputDirectoryKey),
                !savedPath.isEmpty {
                 return URL(fileURLWithPath: savedPath)
             }
             return FileManager.default.homeDirectoryForCurrentUser
                 .appendingPathComponent("Desktop")
-                .appendingPathComponent("Azpaste Screenshots")
+                .appendingPathComponent("Azpaste Dev Screenshots")
         }
         set {
-            UserDefaults.standard.set(newValue.path, forKey: Self.outputDirectoryKey)
+            defaults.set(newValue.path, forKey: Self.outputDirectoryKey)
             updateFolderLabel()
         }
     }
     private var isHotKeyEnabled: Bool {
         get {
-            UserDefaults.standard.bool(forKey: Self.hotKeyEnabledKey)
+            defaults.bool(forKey: Self.hotKeyEnabledKey)
         }
         set {
-            UserDefaults.standard.set(newValue, forKey: Self.hotKeyEnabledKey)
+            defaults.set(newValue, forKey: Self.hotKeyEnabledKey)
             hotKeyCheckbox.state = newValue ? .on : .off
             updateHotKeyRegistration()
             updateStatusMenu()
@@ -823,21 +830,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
     private var hotKeyCode: UInt32 {
         get {
-            let savedCode = UserDefaults.standard.integer(forKey: Self.hotKeyCodeKey)
+            let savedCode = defaults.integer(forKey: Self.hotKeyCodeKey)
             return savedCode == 0 ? Self.defaultHotKeyCode : UInt32(savedCode)
         }
         set {
-            UserDefaults.standard.set(Int(newValue), forKey: Self.hotKeyCodeKey)
+            defaults.set(Int(newValue), forKey: Self.hotKeyCodeKey)
             updateHotKeyControls()
         }
     }
     private var hotKeyModifiers: UInt32 {
         get {
-            let savedModifiers = UserDefaults.standard.integer(forKey: Self.hotKeyModifiersKey)
+            let savedModifiers = defaults.integer(forKey: Self.hotKeyModifiersKey)
             return savedModifiers == 0 ? Self.defaultHotKeyModifiers : UInt32(savedModifiers)
         }
         set {
-            UserDefaults.standard.set(Int(newValue), forKey: Self.hotKeyModifiersKey)
+            defaults.set(Int(newValue), forKey: Self.hotKeyModifiersKey)
             updateHotKeyControls()
         }
     }
@@ -881,7 +888,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         mainMenu.addItem(appMenuItem)
 
         let appMenu = NSMenu()
-        let quitItem = NSMenuItem(title: "退出 Azpaste", action: #selector(quitApp), keyEquivalent: "q")
+        let quitItem = NSMenuItem(title: "退出 \(AppIdentity.appName)", action: #selector(quitApp), keyEquivalent: "q")
         quitItem.target = self
         appMenu.addItem(quitItem)
 
@@ -894,7 +901,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         contentView.wantsLayer = true
         contentView.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
 
-        let title = NSTextField(labelWithString: "Azpaste")
+        let title = NSTextField(labelWithString: AppIdentity.appName)
         title.font = .systemFont(ofSize: 26, weight: .semibold)
         title.textColor = .labelColor
 
@@ -959,7 +966,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             backing: .buffered,
             defer: false
         )
-        window.title = "Azpaste"
+        window.title = AppIdentity.appName
         window.center()
         window.contentView = contentView
         window.isReleasedWhenClosed = false
@@ -1108,7 +1115,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func runCapture(mode: CaptureMode, description: String) {
         guard CGPreflightScreenCaptureAccess() else {
-            statusLabel.stringValue = "请在系统设置中允许 Azpaste 录制屏幕"
+            statusLabel.stringValue = "请在系统设置中允许 \(AppIdentity.appName) 录制屏幕"
             writeSelfTestResult("missing-permission")
             requestScreenCaptureAccessIfNeeded()
             if shouldQuitAfterCapture {
@@ -1238,7 +1245,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             guard let layer = info[kCGWindowLayer as String] as? Int,
                   layer == 0,
                   let ownerName = info[kCGWindowOwnerName as String] as? String,
-                  ownerName != "Azpaste",
+                  !AppIdentity.windowOwnerNamesToIgnore.contains(ownerName),
                   let boundsDictionary = info[kCGWindowBounds as String] as? [String: Any],
                   let windowNumber = info[kCGWindowNumber as String] as? UInt32 else {
                 continue
@@ -1346,22 +1353,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func updateScreenCapturePermissionStatus() {
         guard !CGPreflightScreenCaptureAccess() else {
-            UserDefaults.standard.set(false, forKey: Self.screenCapturePermissionRequestedKey)
+            defaults.set(false, forKey: Self.screenCapturePermissionRequestedKey)
             return
         }
 
-        statusLabel.stringValue = "首次使用前请允许 Azpaste 录制屏幕"
+        statusLabel.stringValue = "首次使用前请允许 \(AppIdentity.appName) 录制屏幕"
     }
 
     private func requestScreenCaptureAccessIfNeeded() {
-        guard !UserDefaults.standard.bool(forKey: Self.screenCapturePermissionRequestedKey) else { return }
+        guard !defaults.bool(forKey: Self.screenCapturePermissionRequestedKey) else { return }
 
-        UserDefaults.standard.set(true, forKey: Self.screenCapturePermissionRequestedKey)
+        defaults.set(true, forKey: Self.screenCapturePermissionRequestedKey)
         CGRequestScreenCaptureAccess()
     }
 
     private func migrateDefaultsIfNeeded() {
-        let defaults = UserDefaults.standard
         guard !defaults.bool(forKey: Self.defaultsMigrationKey),
               let oldDefaults = UserDefaults(suiteName: Self.oldDefaultsSuiteName) else {
             return
@@ -1508,7 +1514,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if status != noErr {
             hotKeyRef = nil
             hotKeyCheckbox.state = .off
-            UserDefaults.standard.set(false, forKey: Self.hotKeyEnabledKey)
+            defaults.set(false, forKey: Self.hotKeyEnabledKey)
             statusLabel.stringValue = "快捷键注册失败，可能被其他应用占用"
         }
     }
