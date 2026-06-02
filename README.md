@@ -34,7 +34,7 @@ make run
 
 `make run` 会复用已经构建好的应用，并通过 `open -n` 启动开发版实例；只有源码、`Info.plist` 或 `Makefile` 变化后才会重新构建并签名。开发版 bundle id 是 `com.azpaste.dev`，屏幕录制权限和正式版 `com.azpaste` 分开记录。
 
-默认使用 ad-hoc 签名；如果 `build/AzpasteSigning.keychain` 存在，则会优先使用其中的 `AzpasteLocalCodeSigning` 本地签名身份。若你有自己的 Apple 开发者代码签名证书，可以这样构建：
+默认使用固定的本地签名身份 `AzpasteLocalCodeSigning`，不会回退到 ad-hoc 签名。如果 `build/AzpasteSigning.keychain` 存在，构建会优先从这个 keychain 查找该身份；否则会从系统可用 keychain 查找。若你有自己的 Apple 开发者代码签名证书，可以这样构建：
 
 ```sh
 make app CODE_SIGN_IDENTITY="Developer ID Application: Your Name"

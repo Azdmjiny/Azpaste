@@ -101,6 +101,7 @@ final class CaptureOverlayView: NSView {
     private static let snapThreshold: CGFloat = 10
     private static let toolbarHeight: CGFloat = 34
     private static let toolbarPadding: CGFloat = 8
+    private static let overlayDismissDelay: TimeInterval = 0.08
 
     private let mode: CaptureMode
     private let completion: (InteractiveCaptureResult) -> Void
@@ -185,16 +186,18 @@ final class CaptureOverlayView: NSView {
 
             if let action = toolbarAction(at: point),
                let selectionRect {
-                complete(.selection(globalRect(from: selectionRect), action))
+                complete(.selection(captureGlobalRect(from: selectionRect), action))
                 return
             }
 
             if let selectionRect,
                state == .editing {
-                if let handle = resizeHandle(at: point, in: selectionRect) {
+                let visibleSelectionRect = pixelAligned(selectionRect)
+                self.selectionRect = visibleSelectionRect
+                if let handle = resizeHandle(at: point, in: visibleSelectionRect) {
                     dragOperation = .resize(handle)
-                } else if selectionRect.contains(point) {
-                    dragOperation = .move(CGPoint(x: point.x - selectionRect.minX, y: point.y - selectionRect.minY))
+                } else if visibleSelectionRect.contains(point) {
+                    dragOperation = .move(CGPoint(x: point.x - visibleSelectionRect.minX, y: point.y - visibleSelectionRect.minY))
                 } else {
                     dragOperation = .create
                     state = .dragging
@@ -289,8 +292,9 @@ final class CaptureOverlayView: NSView {
 
         if let snapCandidateRect,
            state == .idle {
-            drawSelectionFrame(snapCandidateRect, isCandidate: true)
-            drawSizeLabel(for: snapCandidateRect)
+            let displayedCandidateRect = pixelAligned(snapCandidateRect)
+            drawSelectionFrame(displayedCandidateRect, isCandidate: true)
+            drawSizeLabel(for: displayedCandidateRect)
         }
 
         guard let selectionRect else {
@@ -301,11 +305,12 @@ final class CaptureOverlayView: NSView {
             return
         }
 
-        drawSelectionFrame(selectionRect, isCandidate: false)
-        drawSizeLabel(for: selectionRect)
+        let displayedSelectionRect = pixelAligned(selectionRect)
+        drawSelectionFrame(displayedSelectionRect, isCandidate: false)
+        drawSizeLabel(for: displayedSelectionRect)
 
         if state == .editing {
-            drawToolbar(for: selectionRect)
+            drawToolbar(for: displayedSelectionRect)
         }
 
         drawMagnifierIfNeeded()
@@ -313,7 +318,8 @@ final class CaptureOverlayView: NSView {
 
     private func drawMask() {
         NSColor.black.withAlphaComponent(0.22).setFill()
-        if let rect = selectionRect ?? snapCandidateRect {
+        let visibleRect = (selectionRect ?? snapCandidateRect).map(pixelAligned)
+        if let rect = visibleRect {
             let path = NSBezierPath(rect: bounds)
             path.append(NSBezierPath(rect: rect))
             path.windingRule = .evenOdd
@@ -406,22 +412,23 @@ final class CaptureOverlayView: NSView {
     private func drawMagnifierIfNeeded() {
         guard mode == .selection,
               let mouseLocation,
-              let displayID = displayID(containing: globalPoint(from: mouseLocation)),
+              let screen = ScreenCoordinates.screen(containingAppKitPoint: globalPoint(from: mouseLocation)),
+              let displayID = screen.displayID,
               let image = CGDisplayCreateImage(displayID) else {
             return
         }
 
-        let displayBounds = CGDisplayBounds(displayID)
-        let scaleX = CGFloat(image.width) / displayBounds.width
-        let scaleY = CGFloat(image.height) / displayBounds.height
+        let screenFrame = screen.frame
+        let scaleX = CGFloat(image.width) / screenFrame.width
+        let scaleY = CGFloat(image.height) / screenFrame.height
         let global = globalPoint(from: mouseLocation)
         let sampleSize: CGFloat = 28
         let cropRect = CGRect(
-            x: (global.x - displayBounds.minX - sampleSize / 2) * scaleX,
-            y: (global.y - displayBounds.minY - sampleSize / 2) * scaleY,
+            x: (global.x - screenFrame.minX - sampleSize / 2) * scaleX,
+            y: (screenFrame.maxY - global.y - sampleSize / 2) * scaleY,
             width: sampleSize * scaleX,
             height: sampleSize * scaleY
-        ).integral
+        ).integral.intersection(CGRect(x: 0, y: 0, width: CGFloat(image.width), height: CGFloat(image.height)))
 
         guard let cropped = image.cropping(to: cropRect) else { return }
 
@@ -558,7 +565,8 @@ final class CaptureOverlayView: NSView {
                   let boundsDictionary = info[kCGWindowBounds as String] as? [String: Any] else {
                 return nil
             }
-            let rect = CGRect(dictionaryRepresentation: boundsDictionary as CFDictionary) ?? .zero
+            let quartzRect = CGRect(dictionaryRepresentation: boundsDictionary as CFDictionary) ?? .zero
+            guard let rect = ScreenCoordinates.appKitRect(fromQuartzRect: quartzRect) else { return nil }
             guard rect.width > 20, rect.height > 20 else { return nil }
             return rect
         }
@@ -674,30 +682,162 @@ final class CaptureOverlayView: NSView {
         return rect.offsetBy(dx: window.frame.minX, dy: window.frame.minY)
     }
 
+    private func captureGlobalRect(from rect: CGRect) -> CGRect {
+        ScreenCoordinates.pixelAlignedAppKitRect(globalRect(from: rect))
+    }
+
     private func localRect(fromGlobal rect: CGRect) -> CGRect {
         guard let window else { return rect }
         return rect.offsetBy(dx: -window.frame.minX, dy: -window.frame.minY)
     }
 
-    private func displayID(containing point: CGPoint) -> CGDirectDisplayID? {
-        var displayCount: UInt32 = 0
-        CGGetActiveDisplayList(0, nil, &displayCount)
-        var displays = [CGDirectDisplayID](repeating: 0, count: Int(displayCount))
-        CGGetActiveDisplayList(displayCount, &displays, &displayCount)
-
-        return displays.first { CGDisplayBounds($0).contains(point) } ?? displays.first
+    private func pixelAligned(_ rect: CGRect) -> CGRect {
+        localRect(fromGlobal: captureGlobalRect(from: rect))
     }
 
     private func complete(_ result: InteractiveCaptureResult) {
         let completion = self.completion
+        window?.ignoresMouseEvents = true
+        window?.alphaValue = 0
         window?.orderOut(nil)
-        completion(result)
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.overlayDismissDelay) {
+            completion(result)
+        }
     }
 }
 
 private extension CGRect {
     var center: CGPoint {
         CGPoint(x: midX, y: midY)
+    }
+}
+
+private extension NSScreen {
+    var displayID: CGDirectDisplayID? {
+        (deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value
+    }
+}
+
+private enum ScreenCoordinates {
+    static func screen(containingAppKitPoint point: CGPoint) -> NSScreen? {
+        NSScreen.screens.first { $0.frame.contains(point) } ?? nearestAppKitScreen(to: point)
+    }
+
+    static func screen(containingAppKitRect rect: CGRect) -> NSScreen? {
+        let center = CGPoint(x: rect.midX, y: rect.midY)
+        return screen(containingAppKitPoint: center)
+    }
+
+    static func screen(containingQuartzPoint point: CGPoint) -> NSScreen? {
+        NSScreen.screens.first { screen in
+            guard let displayID = screen.displayID else { return false }
+            return CGDisplayBounds(displayID).contains(point)
+        } ?? nearestQuartzScreen(to: point)
+    }
+
+    static func appKitRect(fromQuartzRect rect: CGRect) -> CGRect? {
+        let center = CGPoint(x: rect.midX, y: rect.midY)
+        guard let screen = screen(containingQuartzPoint: center),
+              let displayID = screen.displayID else {
+            return nil
+        }
+
+        let displayBounds = CGDisplayBounds(displayID)
+        return CGRect(
+            x: screen.frame.minX + rect.minX - displayBounds.minX,
+            y: screen.frame.maxY - (rect.maxY - displayBounds.minY),
+            width: rect.width,
+            height: rect.height
+        )
+    }
+
+    static func quartzPoint(fromAppKitPoint point: CGPoint) -> CGPoint? {
+        guard let screen = screen(containingAppKitPoint: point),
+              let displayID = screen.displayID else {
+            return nil
+        }
+
+        let displayBounds = CGDisplayBounds(displayID)
+        return CGPoint(
+            x: displayBounds.minX + point.x - screen.frame.minX,
+            y: displayBounds.minY + screen.frame.maxY - point.y
+        )
+    }
+
+    static func quartzRect(fromAppKitRect rect: CGRect) -> CGRect? {
+        guard let screen = screen(containingAppKitRect: rect),
+              let displayID = screen.displayID else {
+            return nil
+        }
+
+        let displayBounds = CGDisplayBounds(displayID)
+        return CGRect(
+            x: displayBounds.minX + rect.minX - screen.frame.minX,
+            y: displayBounds.minY + screen.frame.maxY - rect.maxY,
+            width: rect.width,
+            height: rect.height
+        )
+    }
+
+    static func pixelAlignedAppKitRect(_ rect: CGRect) -> CGRect {
+        guard let screen = screen(containingAppKitRect: rect) else {
+            return rect.integral
+        }
+
+        let scale = max(screen.backingScaleFactor, 1)
+        let minX = (rect.minX * scale).rounded(.toNearestOrAwayFromZero) / scale
+        let minY = (rect.minY * scale).rounded(.toNearestOrAwayFromZero) / scale
+        let maxX = (rect.maxX * scale).rounded(.toNearestOrAwayFromZero) / scale
+        let maxY = (rect.maxY * scale).rounded(.toNearestOrAwayFromZero) / scale
+        let minSize = 1 / scale
+        return CGRect(
+            x: min(minX, maxX),
+            y: min(minY, maxY),
+            width: max(abs(maxX - minX), minSize),
+            height: max(abs(maxY - minY), minSize)
+        )
+    }
+
+    private static func nearestAppKitScreen(to point: CGPoint) -> NSScreen? {
+        NSScreen.screens.min { lhs, rhs in
+            distance(from: point, to: lhs.frame) < distance(from: point, to: rhs.frame)
+        }
+    }
+
+    private static func nearestQuartzScreen(to point: CGPoint) -> NSScreen? {
+        NSScreen.screens.min { lhs, rhs in
+            guard let lhsDisplayID = lhs.displayID,
+                  let rhsDisplayID = rhs.displayID else {
+                return lhs.displayID != nil
+            }
+            return distance(from: point, to: CGDisplayBounds(lhsDisplayID)) <
+                distance(from: point, to: CGDisplayBounds(rhsDisplayID))
+        }
+    }
+
+    private static func distance(from point: CGPoint, to rect: CGRect) -> CGFloat {
+        let clampedX = min(max(point.x, rect.minX), rect.maxX)
+        let clampedY = min(max(point.y, rect.minY), rect.maxY)
+        return hypot(point.x - clampedX, point.y - clampedY)
+    }
+}
+
+private final class CoordinateSelfTestView: NSView {
+    override func draw(_ dirtyRect: NSRect) {
+        let halfWidth = bounds.width / 2
+        let halfHeight = bounds.height / 2
+
+        NSColor(calibratedRed: 1, green: 0, blue: 0, alpha: 1).setFill()
+        CGRect(x: bounds.minX, y: bounds.midY, width: halfWidth, height: halfHeight).fill()
+
+        NSColor(calibratedRed: 0, green: 1, blue: 0, alpha: 1).setFill()
+        CGRect(x: bounds.midX, y: bounds.midY, width: halfWidth, height: halfHeight).fill()
+
+        NSColor(calibratedRed: 0, green: 0, blue: 1, alpha: 1).setFill()
+        CGRect(x: bounds.minX, y: bounds.minY, width: halfWidth, height: halfHeight).fill()
+
+        NSColor(calibratedRed: 1, green: 1, blue: 0, alpha: 1).setFill()
+        CGRect(x: bounds.midX, y: bounds.minY, width: halfWidth, height: halfHeight).fill()
     }
 }
 
@@ -791,6 +931,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var pinnedWindows: [FloatingPinWindow] = []
     private let shouldCaptureFullScreenOnLaunch = CommandLine.arguments.contains("--capture-fullscreen-on-launch")
     private let shouldQuitAfterCapture = CommandLine.arguments.contains("--quit-after-capture")
+    private let shouldRunCoordinateSelfTest = CommandLine.arguments.contains("--self-test-coordinates")
     private let selfTestResultURL: URL? = {
         guard let index = CommandLine.arguments.firstIndex(of: "--self-test-result"),
               CommandLine.arguments.indices.contains(index + 1) else {
@@ -852,6 +993,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         migrateDefaultsIfNeeded()
         NSApp.setActivationPolicy(.accessory)
+
+        if shouldRunCoordinateSelfTest {
+            runCoordinateSelfTest()
+            exit(EXIT_SUCCESS)
+        }
+
         buildApplicationMenu()
         createOutputDirectory()
         buildWindow()
@@ -1114,8 +1261,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func runCapture(mode: CaptureMode, description: String) {
-        guard CGPreflightScreenCaptureAccess() else {
-            statusLabel.stringValue = "请在系统设置中允许 \(AppIdentity.appName) 录制屏幕"
+        guard hasScreenCaptureAccess() else {
+            statusLabel.stringValue = "请在系统设置中允许 \(AppIdentity.appName)（\(AppIdentity.bundleIdentifier)）录制屏幕"
             writeSelfTestResult("missing-permission")
             requestScreenCaptureAccessIfNeeded()
             if shouldQuitAfterCapture {
@@ -1175,31 +1322,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func captureScreenImage(rect: CGRect?) -> ImageCaptureResult {
-        let captureRect = rect ?? NSScreen.main?.frame ?? CGDisplayBounds(CGMainDisplayID())
-        guard let displayID = displayID(containing: captureRect),
-              let image = CGDisplayCreateImage(displayID) else {
-            return .failure("截屏失败，请检查“系统设置 > 隐私与安全性 > 屏幕与系统音频录制”权限")
-        }
-
         guard let rect else {
+            let captureRect = NSScreen.main?.frame ?? CGDisplayBounds(CGMainDisplayID())
+            guard let screen = ScreenCoordinates.screen(containingAppKitRect: captureRect),
+                  let displayID = screen.displayID,
+                  let image = CGDisplayCreateImage(displayID) else {
+                return .failure("截屏失败，请检查“系统设置 > 隐私与安全性 > 屏幕与系统音频录制”权限")
+            }
             return .success(image)
         }
 
-        let displayBounds = CGDisplayBounds(displayID)
-        let scaleX = CGFloat(image.width) / displayBounds.width
-        let scaleY = CGFloat(image.height) / displayBounds.height
-        let cropRect = CGRect(
-            x: (rect.minX - displayBounds.minX) * scaleX,
-            y: (rect.minY - displayBounds.minY) * scaleY,
-            width: rect.width * scaleX,
-            height: rect.height * scaleY
-        ).integral
-
-        guard let croppedImage = image.cropping(to: cropRect) else {
+        let alignedRect = ScreenCoordinates.pixelAlignedAppKitRect(rect)
+        guard let quartzRect = ScreenCoordinates.quartzRect(fromAppKitRect: alignedRect),
+              let image = CGWindowListCreateImage(
+                quartzRect,
+                .optionOnScreenOnly,
+                kCGNullWindowID,
+                [.bestResolution]
+              ) else {
             return .failure("选区截图失败")
         }
 
-        return .success(croppedImage)
+        return .success(image)
     }
 
     private func captureScreen(rect: CGRect?, destination: URL) -> CaptureResult {
@@ -1209,16 +1353,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         case .failure(let message):
             return .failure(message)
         }
-    }
-
-    private func displayID(containing rect: CGRect) -> CGDirectDisplayID? {
-        var displayCount: UInt32 = 0
-        CGGetActiveDisplayList(0, nil, &displayCount)
-        var displays = [CGDirectDisplayID](repeating: 0, count: Int(displayCount))
-        CGGetActiveDisplayList(displayCount, &displays, &displayCount)
-
-        let center = CGPoint(x: rect.midX, y: rect.midY)
-        return displays.first { CGDisplayBounds($0).contains(center) } ?? displays.first
     }
 
     private func captureWindowImage(at point: CGPoint, destination: URL) -> CaptureResult {
@@ -1236,6 +1370,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func windowID(at point: CGPoint) -> CGWindowID? {
+        guard let quartzPoint = ScreenCoordinates.quartzPoint(fromAppKitPoint: point) else {
+            return nil
+        }
+
         let options: CGWindowListOption = [.optionOnScreenOnly, .excludeDesktopElements]
         guard let windowInfo = CGWindowListCopyWindowInfo(options, kCGNullWindowID) as? [[String: Any]] else {
             return nil
@@ -1252,7 +1390,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
 
             let bounds = CGRect(dictionaryRepresentation: boundsDictionary as CFDictionary) ?? .zero
-            if bounds.contains(point) {
+            if bounds.contains(quartzPoint) {
                 return CGWindowID(windowNumber)
             }
         }
@@ -1351,13 +1489,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         try? message.write(to: selfTestResultURL, atomically: true, encoding: .utf8)
     }
 
+    private func runCoordinateSelfTest() {
+        performCoordinateSelfTest(resultURL: selfTestResultURL)
+    }
+
     private func updateScreenCapturePermissionStatus() {
-        guard !CGPreflightScreenCaptureAccess() else {
+        guard !hasScreenCaptureAccess() else {
             defaults.set(false, forKey: Self.screenCapturePermissionRequestedKey)
             return
         }
 
-        statusLabel.stringValue = "首次使用前请允许 \(AppIdentity.appName) 录制屏幕"
+        statusLabel.stringValue = "首次使用前请允许 \(AppIdentity.appName)（\(AppIdentity.bundleIdentifier)）录制屏幕"
     }
 
     private func requestScreenCaptureAccessIfNeeded() {
@@ -1365,6 +1507,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         defaults.set(true, forKey: Self.screenCapturePermissionRequestedKey)
         CGRequestScreenCaptureAccess()
+    }
+
+    private func hasScreenCaptureAccess() -> Bool {
+        if CGPreflightScreenCaptureAccess() {
+            return true
+        }
+
+        guard let displayID = NSScreen.main?.displayID ?? NSScreen.screens.first?.displayID,
+              let image = CGDisplayCreateImage(displayID) else {
+            return false
+        }
+
+        return image.width > 0 && image.height > 0
     }
 
     private func migrateDefaultsIfNeeded() {
@@ -1640,6 +1795,229 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         formatter.dateFormat = "yyyy-MM-dd HH.mm.ss"
         return "Screenshot \(formatter.string(from: Date())).png"
     }
+}
+
+private func writeSelfTestResult(_ message: String, to resultURL: URL?) {
+    guard let resultURL else { return }
+    try? message.write(to: resultURL, atomically: true, encoding: .utf8)
+}
+
+private func commandLineSelfTestResultURL() -> URL? {
+    guard let index = CommandLine.arguments.firstIndex(of: "--self-test-result"),
+          CommandLine.arguments.indices.contains(index + 1) else {
+        return nil
+    }
+    return URL(fileURLWithPath: CommandLine.arguments[index + 1])
+}
+
+private func hasScreenCaptureAccessForSelfTest() -> Bool {
+    if CGPreflightScreenCaptureAccess() {
+        return true
+    }
+
+    guard let displayID = NSScreen.main?.displayID ?? NSScreen.screens.first?.displayID,
+          let image = CGDisplayCreateImage(displayID) else {
+        return false
+    }
+
+    return image.width > 0 && image.height > 0
+}
+
+private func performCoordinateSelfTest(resultURL: URL?, includeContentCapture: Bool = true) {
+    var lines: [String] = []
+    let tolerance: CGFloat = 0.5
+    let screenCaptureAccess = hasScreenCaptureAccessForSelfTest()
+    writeSelfTestResult("running coordinate-self-test", to: resultURL)
+    lines.append("screen-capture-access=\(screenCaptureAccess)")
+
+    guard !NSScreen.screens.isEmpty else {
+        writeSelfTestResult("failure no-screens", to: resultURL)
+        return
+    }
+
+    for screen in NSScreen.screens {
+        guard let displayID = screen.displayID else {
+            writeSelfTestResult("failure missing-display-id \(screen.frame)", to: resultURL)
+            return
+        }
+
+        let displayBounds = CGDisplayBounds(displayID)
+        lines.append("screen id=\(displayID) appkit=\(screen.frame) quartz=\(displayBounds) scale=\(screen.backingScaleFactor)")
+
+        let sizes = [
+            CGSize(width: min(240, screen.frame.width / 3), height: min(180, screen.frame.height / 3)),
+            CGSize(width: min(64, screen.frame.width / 4), height: min(64, screen.frame.height / 4))
+        ]
+        let origins = [
+            CGPoint(x: screen.frame.minX + 8, y: screen.frame.minY + 8),
+            CGPoint(x: screen.frame.midX - sizes[0].width / 2, y: screen.frame.midY - sizes[0].height / 2),
+            CGPoint(x: screen.frame.maxX - sizes[1].width - 8, y: screen.frame.maxY - sizes[1].height - 8)
+        ]
+
+        for (index, origin) in origins.enumerated() {
+            let size = sizes[min(index, sizes.count - 1)]
+            let appKitRect = CGRect(origin: origin, size: size)
+
+            let alignedAppKitRect = ScreenCoordinates.pixelAlignedAppKitRect(appKitRect)
+            guard let quartzRect = ScreenCoordinates.quartzRect(fromAppKitRect: alignedAppKitRect),
+                  let roundTripRect = ScreenCoordinates.appKitRect(fromQuartzRect: quartzRect) else {
+                writeSelfTestResult("failure conversion-nil \(appKitRect)", to: resultURL)
+                return
+            }
+
+            let delta = max(
+                abs(alignedAppKitRect.minX - roundTripRect.minX),
+                abs(alignedAppKitRect.minY - roundTripRect.minY),
+                abs(alignedAppKitRect.width - roundTripRect.width),
+                abs(alignedAppKitRect.height - roundTripRect.height)
+            )
+            lines.append("rect \(appKitRect) aligned=\(alignedAppKitRect) quartz=\(quartzRect) roundTrip=\(roundTripRect) delta=\(delta)")
+
+            if delta > tolerance {
+                writeSelfTestResult("failure coordinate-roundtrip \(lines.joined(separator: "\n"))", to: resultURL)
+                return
+            }
+
+            guard includeContentCapture,
+                  screenCaptureAccess else {
+                continue
+            }
+
+            guard let image = CGWindowListCreateImage(
+                quartzRect,
+                .optionOnScreenOnly,
+                kCGNullWindowID,
+                [.bestResolution]
+            ) else {
+                writeSelfTestResult("failure capture-nil \(lines.joined(separator: "\n"))", to: resultURL)
+                return
+            }
+
+            let expectedWidth = alignedAppKitRect.width * screen.backingScaleFactor
+            let expectedHeight = alignedAppKitRect.height * screen.backingScaleFactor
+            let imageDelta = max(
+                abs(CGFloat(image.width) - expectedWidth),
+                abs(CGFloat(image.height) - expectedHeight)
+            )
+            lines.append("capture image=\(image.width)x\(image.height) expected=\(expectedWidth)x\(expectedHeight) delta=\(imageDelta)")
+
+            if imageDelta > screen.backingScaleFactor {
+                writeSelfTestResult("failure capture-size \(lines.joined(separator: "\n"))", to: resultURL)
+                return
+            }
+        }
+    }
+
+    guard includeContentCapture else {
+        writeSelfTestResult("success coordinate-roundtrip\n\(lines.joined(separator: "\n"))", to: resultURL)
+        return
+    }
+
+    guard screenCaptureAccess else {
+        writeSelfTestResult("failure missing-permission\n\(lines.joined(separator: "\n"))", to: resultURL)
+        return
+    }
+
+    guard runSelectionContentSelfTest(lines: &lines) else {
+        writeSelfTestResult("failure selection-content \(lines.joined(separator: "\n"))", to: resultURL)
+        return
+    }
+
+    writeSelfTestResult("success coordinate-roundtrip\n\(lines.joined(separator: "\n"))", to: resultURL)
+}
+
+private func runSelectionContentSelfTest(lines: inout [String]) -> Bool {
+    guard let screen = NSScreen.main ?? NSScreen.screens.first else {
+        lines.append("content-test missing-screen")
+        return false
+    }
+
+    let windowSize = CGSize(width: 160, height: 120)
+    let windowFrame = CGRect(
+        x: screen.frame.midX - windowSize.width / 2,
+        y: screen.frame.midY - windowSize.height / 2,
+        width: windowSize.width,
+        height: windowSize.height
+    )
+    let window = NSWindow(
+        contentRect: windowFrame,
+        styleMask: [.borderless],
+        backing: .buffered,
+        defer: false
+    )
+    window.contentView = CoordinateSelfTestView(frame: CGRect(origin: .zero, size: windowSize))
+    window.backgroundColor = .black
+    window.isOpaque = true
+    window.level = .floating
+    window.orderFrontRegardless()
+    window.displayIfNeeded()
+
+    RunLoop.current.run(until: Date().addingTimeInterval(0.25))
+
+    defer {
+        window.orderOut(nil)
+        window.close()
+    }
+
+    let selectionRect = CGRect(
+        x: windowFrame.minX + 20,
+        y: windowFrame.maxY - 42,
+        width: 36,
+        height: 28
+    )
+
+    let alignedSelectionRect = ScreenCoordinates.pixelAlignedAppKitRect(selectionRect)
+    guard let quartzRect = ScreenCoordinates.quartzRect(fromAppKitRect: alignedSelectionRect),
+          let image = CGWindowListCreateImage(
+            quartzRect,
+            .optionOnScreenOnly,
+            kCGNullWindowID,
+            [.bestResolution]
+          ) else {
+        lines.append("content-test capture-nil selection=\(selectionRect) aligned=\(alignedSelectionRect)")
+        return false
+    }
+
+    guard let color = centerPixelRGBA(in: image) else {
+        lines.append("content-test missing-pixel image=\(image.width)x\(image.height)")
+        return false
+    }
+
+    lines.append("content-test selection=\(selectionRect) aligned=\(alignedSelectionRect) quartz=\(quartzRect) image=\(image.width)x\(image.height) centerRGBA=\(color)")
+    return color.red > 200 && color.green < 80 && color.blue < 80 && color.alpha > 200
+}
+
+private func centerPixelRGBA(in image: CGImage) -> (red: UInt8, green: UInt8, blue: UInt8, alpha: UInt8)? {
+    guard let data = CFDataCreateMutable(nil, 4),
+          let destination = CGImageDestinationCreateWithData(data, UTType.png.identifier as CFString, 1, nil) else {
+        return nil
+    }
+
+    CGImageDestinationAddImage(destination, image, nil)
+    guard CGImageDestinationFinalize(destination),
+          let bitmap = NSBitmapImageRep(data: data as Data) else {
+        return nil
+    }
+
+    let x = max(0, min(bitmap.pixelsWide - 1, bitmap.pixelsWide / 2))
+    let y = max(0, min(bitmap.pixelsHigh - 1, bitmap.pixelsHigh / 2))
+    guard let color = bitmap.colorAt(x: x, y: y)?.usingColorSpace(.deviceRGB) else {
+        return nil
+    }
+
+    return (
+        red: UInt8(max(0, min(255, round(color.redComponent * 255)))),
+        green: UInt8(max(0, min(255, round(color.greenComponent * 255)))),
+        blue: UInt8(max(0, min(255, round(color.blueComponent * 255)))),
+        alpha: UInt8(max(0, min(255, round(color.alphaComponent * 255))))
+    )
+}
+
+if CommandLine.arguments.contains("--self-test-coordinates"),
+   Bundle.main.bundleURL.pathExtension != "app" {
+    _ = NSApplication.shared
+    performCoordinateSelfTest(resultURL: commandLineSelfTestResultURL(), includeContentCapture: false)
+    exit(EXIT_SUCCESS)
 }
 
 let app = NSApplication.shared
