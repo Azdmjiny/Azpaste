@@ -9,14 +9,31 @@ enum CaptureResult {
     case failure(String)
 }
 
+enum ImageCaptureResult {
+    case success(CGImage)
+    case failure(String)
+}
+
 enum CaptureMode {
     case selection
     case window
     case fullScreen
 }
 
+enum SelectionCaptureAction {
+    case copy
+    case save
+    case pin
+}
+
+enum InteractiveCaptureResult {
+    case cancelled
+    case selection(CGRect, SelectionCaptureAction)
+    case window(CGPoint)
+}
+
 final class CaptureOverlayWindow: NSWindow {
-    init(mode: CaptureMode, completion: @escaping (CGRect?) -> Void) {
+    init(mode: CaptureMode, completion: @escaping (InteractiveCaptureResult) -> Void) {
         let frame = NSScreen.screens.reduce(CGRect.null) { result, screen in
             result.union(screen.frame)
         }
@@ -34,6 +51,7 @@ final class CaptureOverlayWindow: NSWindow {
         level = .screenSaver
         collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
         ignoresMouseEvents = false
+        acceptsMouseMovedEvents = true
     }
 
     override var canBecomeKey: Bool {
@@ -42,12 +60,54 @@ final class CaptureOverlayWindow: NSWindow {
 }
 
 final class CaptureOverlayView: NSView {
-    private let mode: CaptureMode
-    private let completion: (CGRect?) -> Void
-    private var dragStart: CGPoint?
-    private var dragEnd: CGPoint?
+    private enum SelectionState {
+        case idle
+        case dragging
+        case editing
+    }
 
-    init(mode: CaptureMode, completion: @escaping (CGRect?) -> Void) {
+    private enum DragOperation {
+        case create
+        case move(CGPoint)
+        case resize(ResizeHandle)
+    }
+
+    private enum ResizeHandle {
+        case topLeft
+        case top
+        case topRight
+        case right
+        case bottomRight
+        case bottom
+        case bottomLeft
+        case left
+    }
+
+    private struct ToolbarButton {
+        let title: String
+        let action: SelectionCaptureAction
+        let rect: CGRect
+    }
+
+    private static let minSelectionSize: CGFloat = 4
+    private static let dragThreshold: CGFloat = 3
+    private static let handleHitSize: CGFloat = 8
+    private static let snapThreshold: CGFloat = 10
+    private static let toolbarHeight: CGFloat = 34
+    private static let toolbarPadding: CGFloat = 8
+
+    private let mode: CaptureMode
+    private let completion: (InteractiveCaptureResult) -> Void
+    private var state: SelectionState = .idle
+    private var dragOperation: DragOperation?
+    private var dragStart: CGPoint?
+    private var dragCurrent: CGPoint?
+    private var mouseLocation: CGPoint?
+    private var selectionRect: CGRect?
+    private var snapCandidateRect: CGRect?
+    private var toolbarButtons: [ToolbarButton] = []
+
+    init(mode: CaptureMode, completion: @escaping (InteractiveCaptureResult) -> Void) {
         self.mode = mode
         self.completion = completion
         super.init(frame: .zero)
@@ -73,70 +133,321 @@ final class CaptureOverlayView: NSView {
 
     override func keyDown(with event: NSEvent) {
         if event.keyCode == UInt16(kVK_Escape) {
-            complete(nil)
+            complete(.cancelled)
+            return
         }
+
+        guard mode == .selection,
+              state == .editing,
+              var rect = selectionRect else {
+            return
+        }
+
+        let step: CGFloat = event.modifierFlags.contains(.option) ? 10 : 1
+        switch Int(event.keyCode) {
+        case kVK_LeftArrow:
+            rect.origin.x -= step
+        case kVK_RightArrow:
+            rect.origin.x += step
+        case kVK_UpArrow:
+            rect.origin.y += step
+        case kVK_DownArrow:
+            rect.origin.y -= step
+        default:
+            return
+        }
+        selectionRect = constrained(rect)
+        needsDisplay = true
+    }
+
+    override func mouseMoved(with event: NSEvent) {
+        mouseLocation = event.locationInWindow
+        if mode == .selection,
+           state == .idle {
+            snapCandidateRect = snapCandidate(at: event.locationInWindow)
+        }
+        needsDisplay = true
     }
 
     override func mouseDown(with event: NSEvent) {
         let point = event.locationInWindow
+        mouseLocation = point
         switch mode {
         case .selection:
             dragStart = point
-            dragEnd = point
-            needsDisplay = true
+            dragCurrent = point
+
+            if let action = toolbarAction(at: point),
+               let selectionRect {
+                complete(.selection(globalRect(from: selectionRect), action))
+                return
+            }
+
+            if let selectionRect,
+               state == .editing {
+                if let handle = resizeHandle(at: point, in: selectionRect) {
+                    dragOperation = .resize(handle)
+                } else if selectionRect.contains(point) {
+                    dragOperation = .move(CGPoint(x: point.x - selectionRect.minX, y: point.y - selectionRect.minY))
+                } else {
+                    dragOperation = .create
+                    state = .dragging
+                    self.selectionRect = nil
+                }
+            } else {
+                dragOperation = .create
+            }
         case .window:
-            complete(CGRect(origin: globalPoint(from: point), size: .zero))
+            complete(.window(globalPoint(from: point)))
         case .fullScreen:
             break
         }
+        needsDisplay = true
     }
 
     override func mouseDragged(with event: NSEvent) {
         guard mode == .selection else { return }
-        dragEnd = event.locationInWindow
+        let point = event.locationInWindow
+        mouseLocation = point
+        dragCurrent = point
+
+        switch dragOperation {
+        case .create:
+            state = .dragging
+            snapCandidateRect = nil
+            if let dragStart {
+                selectionRect = normalizedRect(from: dragStart, to: point)
+            }
+        case .move(let offset):
+            guard var rect = selectionRect else { break }
+            rect.origin = CGPoint(x: point.x - offset.x, y: point.y - offset.y)
+            selectionRect = constrained(rect)
+        case .resize(let handle):
+            guard let rect = selectionRect else { break }
+            selectionRect = constrained(resizedRect(rect, handle: handle, to: point))
+        case .none:
+            break
+        }
         needsDisplay = true
     }
 
     override func mouseUp(with event: NSEvent) {
-        guard mode == .selection,
-              let dragStart else {
+        guard mode == .selection else {
             return
         }
 
-        let rect = normalizedRect(from: dragStart, to: event.locationInWindow)
-        if rect.width < 4 || rect.height < 4 {
-            complete(nil)
+        let point = event.locationInWindow
+        mouseLocation = point
+
+        if let dragStart,
+           distance(from: dragStart, to: point) < Self.dragThreshold,
+           state == .idle,
+           let snapCandidateRect {
+            selectionRect = constrained(snapCandidateRect)
+            state = .editing
+            self.dragStart = nil
+            dragCurrent = nil
+            dragOperation = nil
+            needsDisplay = true
             return
         }
 
-        complete(globalRect(from: rect))
+        if let rect = selectionRect,
+           rect.width >= Self.minSelectionSize,
+           rect.height >= Self.minSelectionSize {
+            selectionRect = constrained(rect)
+            state = .editing
+        } else if isCreatingSelection {
+            selectionRect = nil
+            state = .idle
+            snapCandidateRect = snapCandidate(at: point)
+        }
+
+        dragStart = nil
+        dragCurrent = nil
+        dragOperation = nil
+        needsDisplay = true
     }
 
     override func draw(_ dirtyRect: NSRect) {
-        NSColor.black.withAlphaComponent(0.22).setFill()
-        dirtyRect.fill()
+        drawMask()
 
         if mode == .window {
             let text = "点击要截取的窗口，按 Esc 取消"
             drawHint(text)
         }
 
-        guard mode == .selection,
-              let dragStart,
-              let dragEnd else {
-            if mode == .selection {
-                drawHint("拖拽选择截图区域，按 Esc 取消")
-            }
+        guard mode == .selection else {
             return
         }
 
-        let rect = normalizedRect(from: dragStart, to: dragEnd)
-        NSColor.clear.setFill()
-        rect.fill(using: .clear)
-        NSColor.controlAccentColor.setStroke()
+        if let snapCandidateRect,
+           state == .idle {
+            drawSelectionFrame(snapCandidateRect, isCandidate: true)
+            drawSizeLabel(for: snapCandidateRect)
+        }
+
+        guard let selectionRect else {
+            if mode == .selection {
+                drawHint("拖拽选择截图区域，靠近窗口或屏幕边缘可吸附，按 Esc 取消")
+            }
+            drawMagnifierIfNeeded()
+            return
+        }
+
+        drawSelectionFrame(selectionRect, isCandidate: false)
+        drawSizeLabel(for: selectionRect)
+
+        if state == .editing {
+            drawToolbar(for: selectionRect)
+        }
+
+        drawMagnifierIfNeeded()
+    }
+
+    private func drawMask() {
+        NSColor.black.withAlphaComponent(0.22).setFill()
+        if let rect = selectionRect ?? snapCandidateRect {
+            let path = NSBezierPath(rect: bounds)
+            path.append(NSBezierPath(rect: rect))
+            path.windingRule = .evenOdd
+            path.fill()
+        } else {
+            bounds.fill()
+        }
+    }
+
+    private func drawSelectionFrame(_ rect: CGRect, isCandidate: Bool) {
+        (isCandidate ? NSColor.systemYellow : NSColor.controlAccentColor).setStroke()
         let path = NSBezierPath(rect: rect)
-        path.lineWidth = 2
+        path.lineWidth = isCandidate ? 2 : 2.5
+        if isCandidate {
+            path.setLineDash([6, 4], count: 2, phase: 0)
+        }
         path.stroke()
+
+        guard !isCandidate else { return }
+        NSColor.controlAccentColor.setFill()
+        for handleRect in handleRects(for: rect) {
+            let handlePath = NSBezierPath(roundedRect: handleRect, xRadius: 2, yRadius: 2)
+            handlePath.fill()
+        }
+    }
+
+    private func drawSizeLabel(for rect: CGRect) {
+        let size = pixelSize(for: rect)
+        let text = "\(Int(size.width)) × \(Int(size.height))"
+        let attributes: [NSAttributedString.Key: Any] = [
+            .font: NSFont.monospacedDigitSystemFont(ofSize: 12, weight: .medium),
+            .foregroundColor: NSColor.white
+        ]
+        let textSize = text.size(withAttributes: attributes)
+        let labelRect = placedRect(
+            preferred: CGRect(x: rect.minX, y: rect.maxY + 8, width: textSize.width + 14, height: 24),
+            avoiding: nil
+        )
+
+        NSColor.black.withAlphaComponent(0.72).setFill()
+        NSBezierPath(roundedRect: labelRect, xRadius: 5, yRadius: 5).fill()
+        text.draw(
+            in: labelRect.insetBy(dx: 7, dy: 3),
+            withAttributes: attributes
+        )
+    }
+
+    private func drawToolbar(for rect: CGRect) {
+        let titles: [(String, SelectionCaptureAction)] = [
+            ("复制到粘贴板", .copy),
+            ("保存到本地", .save),
+            ("悬浮贴图", .pin)
+        ]
+        let font = NSFont.systemFont(ofSize: 13, weight: .medium)
+        let attributes: [NSAttributedString.Key: Any] = [
+            .font: font,
+            .foregroundColor: NSColor.white
+        ]
+        var x: CGFloat = 0
+        var buttons: [ToolbarButton] = []
+        let widths = titles.map { title, _ in
+            title.size(withAttributes: attributes).width + 22
+        }
+        let toolbarWidth = widths.reduce(0, +) + CGFloat(widths.count - 1) * 6 + Self.toolbarPadding * 2
+        let toolbarRect = placedRect(
+            preferred: CGRect(
+                x: rect.minX,
+                y: rect.minY - Self.toolbarHeight - 10,
+                width: toolbarWidth,
+                height: Self.toolbarHeight
+            ),
+            avoiding: rect
+        )
+
+        NSColor.black.withAlphaComponent(0.78).setFill()
+        NSBezierPath(roundedRect: toolbarRect, xRadius: 6, yRadius: 6).fill()
+
+        x = toolbarRect.minX + Self.toolbarPadding
+        for (index, item) in titles.enumerated() {
+            let buttonRect = CGRect(x: x, y: toolbarRect.minY + 5, width: widths[index], height: Self.toolbarHeight - 10)
+            NSColor.controlAccentColor.withAlphaComponent(0.85).setFill()
+            NSBezierPath(roundedRect: buttonRect, xRadius: 5, yRadius: 5).fill()
+            item.0.draw(in: buttonRect.insetBy(dx: 11, dy: 3), withAttributes: attributes)
+            buttons.append(ToolbarButton(title: item.0, action: item.1, rect: buttonRect))
+            x += widths[index] + 6
+        }
+        toolbarButtons = buttons
+    }
+
+    private func drawMagnifierIfNeeded() {
+        guard mode == .selection,
+              let mouseLocation,
+              let displayID = displayID(containing: globalPoint(from: mouseLocation)),
+              let image = CGDisplayCreateImage(displayID) else {
+            return
+        }
+
+        let displayBounds = CGDisplayBounds(displayID)
+        let scaleX = CGFloat(image.width) / displayBounds.width
+        let scaleY = CGFloat(image.height) / displayBounds.height
+        let global = globalPoint(from: mouseLocation)
+        let sampleSize: CGFloat = 28
+        let cropRect = CGRect(
+            x: (global.x - displayBounds.minX - sampleSize / 2) * scaleX,
+            y: (global.y - displayBounds.minY - sampleSize / 2) * scaleY,
+            width: sampleSize * scaleX,
+            height: sampleSize * scaleY
+        ).integral
+
+        guard let cropped = image.cropping(to: cropRect) else { return }
+
+        let magnifierSize: CGFloat = 116
+        let targetRect = placedRect(
+            preferred: CGRect(
+                x: mouseLocation.x + 18,
+                y: mouseLocation.y - magnifierSize - 18,
+                width: magnifierSize,
+                height: magnifierSize
+            ),
+            avoiding: selectionRect
+        )
+
+        guard let context = NSGraphicsContext.current?.cgContext else { return }
+        context.saveGState()
+        let clipPath = NSBezierPath(roundedRect: targetRect, xRadius: 8, yRadius: 8)
+        clipPath.addClip()
+        context.draw(cropped, in: targetRect)
+        context.restoreGState()
+
+        NSColor.white.withAlphaComponent(0.9).setStroke()
+        NSBezierPath(roundedRect: targetRect, xRadius: 8, yRadius: 8).stroke()
+
+        let crosshair = NSBezierPath()
+        crosshair.move(to: CGPoint(x: targetRect.midX, y: targetRect.minY))
+        crosshair.line(to: CGPoint(x: targetRect.midX, y: targetRect.maxY))
+        crosshair.move(to: CGPoint(x: targetRect.minX, y: targetRect.midY))
+        crosshair.line(to: CGPoint(x: targetRect.maxX, y: targetRect.midY))
+        crosshair.lineWidth = 1
+        NSColor.systemRed.withAlphaComponent(0.9).setStroke()
+        crosshair.stroke()
     }
 
     private func drawHint(_ text: String) {
@@ -163,6 +474,190 @@ final class CaptureOverlayView: NSView {
         )
     }
 
+    private func resizedRect(_ rect: CGRect, handle: ResizeHandle, to point: CGPoint) -> CGRect {
+        var minX = rect.minX
+        var minY = rect.minY
+        var maxX = rect.maxX
+        var maxY = rect.maxY
+
+        switch handle {
+        case .topLeft:
+            minX = point.x
+            maxY = point.y
+        case .top:
+            maxY = point.y
+        case .topRight:
+            maxX = point.x
+            maxY = point.y
+        case .right:
+            maxX = point.x
+        case .bottomRight:
+            maxX = point.x
+            minY = point.y
+        case .bottom:
+            minY = point.y
+        case .bottomLeft:
+            minX = point.x
+            minY = point.y
+        case .left:
+            minX = point.x
+        }
+
+        return normalizedRect(from: CGPoint(x: minX, y: minY), to: CGPoint(x: maxX, y: maxY))
+    }
+
+    private func constrained(_ rect: CGRect) -> CGRect {
+        var result = rect
+        if result.width < Self.minSelectionSize {
+            result.size.width = Self.minSelectionSize
+        }
+        if result.height < Self.minSelectionSize {
+            result.size.height = Self.minSelectionSize
+        }
+        result.origin.x = min(max(result.minX, bounds.minX), bounds.maxX - result.width)
+        result.origin.y = min(max(result.minY, bounds.minY), bounds.maxY - result.height)
+        return result
+    }
+
+    private func snapCandidate(at point: CGPoint) -> CGRect? {
+        let global = globalPoint(from: point)
+        var candidates = NSScreen.screens.map(\.frame)
+        candidates.append(contentsOf: visibleWindowRects())
+
+        let matching = candidates
+            .filter { rect in
+                rect.width >= Self.minSelectionSize &&
+                    rect.height >= Self.minSelectionSize &&
+                    distanceToEdge(of: rect, from: global) <= Self.snapThreshold
+            }
+            .sorted { lhs, rhs in
+                distanceToEdge(of: lhs, from: global) < distanceToEdge(of: rhs, from: global)
+            }
+
+        guard let rect = matching.first else { return nil }
+        return localRect(fromGlobal: rect)
+    }
+
+    private func visibleWindowRects() -> [CGRect] {
+        let options: CGWindowListOption = [.optionOnScreenOnly, .excludeDesktopElements]
+        guard let windowInfo = CGWindowListCopyWindowInfo(options, kCGNullWindowID) as? [[String: Any]] else {
+            return []
+        }
+
+        return windowInfo.compactMap { info in
+            guard let layer = info[kCGWindowLayer as String] as? Int,
+                  layer == 0,
+                  let ownerName = info[kCGWindowOwnerName as String] as? String,
+                  ownerName != "Azpaste",
+                  let boundsDictionary = info[kCGWindowBounds as String] as? [String: Any] else {
+                return nil
+            }
+            let rect = CGRect(dictionaryRepresentation: boundsDictionary as CFDictionary) ?? .zero
+            guard rect.width > 20, rect.height > 20 else { return nil }
+            return rect
+        }
+    }
+
+    private func distanceToEdge(of rect: CGRect, from point: CGPoint) -> CGFloat {
+        guard rect.insetBy(dx: -Self.snapThreshold, dy: -Self.snapThreshold).contains(point) else {
+            return .greatestFiniteMagnitude
+        }
+
+        return min(
+            abs(point.x - rect.minX),
+            abs(point.x - rect.maxX),
+            abs(point.y - rect.minY),
+            abs(point.y - rect.maxY)
+        )
+    }
+
+    private func resizeHandle(at point: CGPoint, in rect: CGRect) -> ResizeHandle? {
+        let handles: [(ResizeHandle, CGRect)] = [
+            (.topLeft, handleRect(center: CGPoint(x: rect.minX, y: rect.maxY))),
+            (.top, handleRect(center: CGPoint(x: rect.midX, y: rect.maxY))),
+            (.topRight, handleRect(center: CGPoint(x: rect.maxX, y: rect.maxY))),
+            (.right, handleRect(center: CGPoint(x: rect.maxX, y: rect.midY))),
+            (.bottomRight, handleRect(center: CGPoint(x: rect.maxX, y: rect.minY))),
+            (.bottom, handleRect(center: CGPoint(x: rect.midX, y: rect.minY))),
+            (.bottomLeft, handleRect(center: CGPoint(x: rect.minX, y: rect.minY))),
+            (.left, handleRect(center: CGPoint(x: rect.minX, y: rect.midY)))
+        ]
+        return handles.first { $0.1.insetBy(dx: -4, dy: -4).contains(point) }?.0
+    }
+
+    private func handleRects(for rect: CGRect) -> [CGRect] {
+        [
+            CGPoint(x: rect.minX, y: rect.maxY),
+            CGPoint(x: rect.midX, y: rect.maxY),
+            CGPoint(x: rect.maxX, y: rect.maxY),
+            CGPoint(x: rect.maxX, y: rect.midY),
+            CGPoint(x: rect.maxX, y: rect.minY),
+            CGPoint(x: rect.midX, y: rect.minY),
+            CGPoint(x: rect.minX, y: rect.minY),
+            CGPoint(x: rect.minX, y: rect.midY)
+        ].map(handleRect(center:))
+    }
+
+    private func handleRect(center: CGPoint) -> CGRect {
+        CGRect(
+            x: center.x - Self.handleHitSize / 2,
+            y: center.y - Self.handleHitSize / 2,
+            width: Self.handleHitSize,
+            height: Self.handleHitSize
+        )
+    }
+
+    private func toolbarAction(at point: CGPoint) -> SelectionCaptureAction? {
+        toolbarButtons.first { $0.rect.contains(point) }?.action
+    }
+
+    private func pixelSize(for rect: CGRect) -> CGSize {
+        guard let screen = NSScreen.screens.first(where: { $0.frame.contains(globalRect(from: rect).center) }) else {
+            return rect.size
+        }
+        return CGSize(width: rect.width * screen.backingScaleFactor, height: rect.height * screen.backingScaleFactor)
+    }
+
+    private func placedRect(preferred: CGRect, avoiding avoidRect: CGRect?) -> CGRect {
+        var rect = preferred
+        if rect.maxX > bounds.maxX - 8 {
+            rect.origin.x = bounds.maxX - rect.width - 8
+        }
+        if rect.minX < bounds.minX + 8 {
+            rect.origin.x = bounds.minX + 8
+        }
+        if rect.maxY > bounds.maxY - 8 {
+            rect.origin.y = bounds.maxY - rect.height - 8
+        }
+        if rect.minY < bounds.minY + 8 {
+            rect.origin.y = bounds.minY + 8
+        }
+        if let avoidRect,
+           rect.intersects(avoidRect) {
+            let above = CGRect(x: avoidRect.minX, y: avoidRect.maxY + 10, width: rect.width, height: rect.height)
+            let below = CGRect(x: avoidRect.minX, y: avoidRect.minY - rect.height - 10, width: rect.width, height: rect.height)
+            rect = above.maxY <= bounds.maxY ? above : below
+            if rect.maxX > bounds.maxX - 8 {
+                rect.origin.x = bounds.maxX - rect.width - 8
+            }
+            if rect.minY < bounds.minY + 8 {
+                rect.origin.y = bounds.minY + 8
+            }
+        }
+        return rect
+    }
+
+    private func distance(from start: CGPoint, to end: CGPoint) -> CGFloat {
+        hypot(start.x - end.x, start.y - end.y)
+    }
+
+    private var isCreatingSelection: Bool {
+        if case .create = dragOperation {
+            return true
+        }
+        return false
+    }
+
     private func globalPoint(from point: CGPoint) -> CGPoint {
         guard let window else { return point }
         return CGPoint(x: window.frame.minX + point.x, y: window.frame.minY + point.y)
@@ -173,10 +668,92 @@ final class CaptureOverlayView: NSView {
         return rect.offsetBy(dx: window.frame.minX, dy: window.frame.minY)
     }
 
-    private func complete(_ rect: CGRect?) {
-        let completion = completion
+    private func localRect(fromGlobal rect: CGRect) -> CGRect {
+        guard let window else { return rect }
+        return rect.offsetBy(dx: -window.frame.minX, dy: -window.frame.minY)
+    }
+
+    private func displayID(containing point: CGPoint) -> CGDirectDisplayID? {
+        var displayCount: UInt32 = 0
+        CGGetActiveDisplayList(0, nil, &displayCount)
+        var displays = [CGDirectDisplayID](repeating: 0, count: Int(displayCount))
+        CGGetActiveDisplayList(displayCount, &displays, &displayCount)
+
+        return displays.first { CGDisplayBounds($0).contains(point) } ?? displays.first
+    }
+
+    private func complete(_ result: InteractiveCaptureResult) {
+        let completion = self.completion
         window?.orderOut(nil)
-        completion(rect)
+        completion(result)
+    }
+}
+
+private extension CGRect {
+    var center: CGPoint {
+        CGPoint(x: midX, y: midY)
+    }
+}
+
+final class FloatingPinWindow: NSWindow {
+    init(image: CGImage) {
+        let imageSize = CGSize(width: image.width, height: image.height)
+        let screen = NSScreen.main ?? NSScreen.screens.first
+        let visibleFrame = screen?.visibleFrame ?? CGRect(x: 0, y: 0, width: 900, height: 700)
+        let maxSize = CGSize(width: visibleFrame.width * 0.72, height: visibleFrame.height * 0.72)
+        let scale = min(1, maxSize.width / imageSize.width, maxSize.height / imageSize.height)
+        let windowSize = CGSize(width: imageSize.width * scale, height: imageSize.height * scale)
+        let frame = CGRect(
+            x: visibleFrame.midX - windowSize.width / 2,
+            y: visibleFrame.midY - windowSize.height / 2,
+            width: windowSize.width,
+            height: windowSize.height
+        )
+
+        let imageView = DoubleClickImageView(frame: CGRect(origin: .zero, size: windowSize))
+        imageView.image = NSImage(cgImage: image, size: imageSize)
+        imageView.imageScaling = .scaleProportionallyUpOrDown
+
+        super.init(
+            contentRect: frame,
+            styleMask: [.borderless],
+            backing: .buffered,
+            defer: false
+        )
+        contentView = imageView
+        backgroundColor = .clear
+        isOpaque = false
+        level = .floating
+        collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        isMovableByWindowBackground = true
+        hasShadow = true
+        imageView.closeHandler = { [weak self] in
+            self?.close()
+        }
+    }
+
+    override var canBecomeKey: Bool {
+        true
+    }
+}
+
+final class DoubleClickImageView: NSImageView {
+    var closeHandler: (() -> Void)?
+
+    override func mouseDown(with event: NSEvent) {
+        if event.clickCount >= 2 {
+            closeHandler?()
+        } else {
+            window?.performDrag(with: event)
+        }
+    }
+
+    override func keyDown(with event: NSEvent) {
+        if event.keyCode == UInt16(kVK_Escape) {
+            closeHandler?()
+        } else {
+            super.keyDown(with: event)
+        }
     }
 }
 
@@ -204,6 +781,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var hotKeyHandler: EventHandlerRef?
     private var hotKeyCaptureMonitor: Any?
     private var captureOverlayWindow: CaptureOverlayWindow?
+    private var pinnedWindows: [FloatingPinWindow] = []
     private let shouldCaptureFullScreenOnLaunch = CommandLine.arguments.contains("--capture-fullscreen-on-launch")
     private let shouldQuitAfterCapture = CommandLine.arguments.contains("--quit-after-capture")
     private let selfTestResultURL: URL? = {
@@ -563,35 +1141,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func beginInteractiveCapture(mode: CaptureMode, destination: URL) {
-        captureOverlayWindow = CaptureOverlayWindow(mode: mode) { [weak self] selection in
+        captureOverlayWindow = CaptureOverlayWindow(mode: mode) { [weak self] captureResult in
             guard let self else { return }
             self.captureOverlayWindow = nil
 
-            guard let selection else {
+            switch captureResult {
+            case .cancelled:
                 self.finishCapture(.failure("已取消截屏"), destination: destination)
-                return
-            }
-
-            DispatchQueue.global(qos: .userInitiated).async {
-                let result: CaptureResult
-                switch mode {
-                case .selection:
-                    result = self.captureScreen(rect: selection, destination: destination)
-                case .window:
-                    result = self.captureWindowImage(at: selection.origin, destination: destination)
-                case .fullScreen:
-                    result = self.captureScreen(rect: nil, destination: destination)
+            case .selection(let rect, let action):
+                DispatchQueue.global(qos: .userInitiated).async {
+                    let imageResult = self.captureScreenImage(rect: rect)
+                    DispatchQueue.main.async {
+                        self.finishSelectionCapture(imageResult, action: action, destination: destination)
+                    }
                 }
-
-                DispatchQueue.main.async {
-                    self.finishCapture(result, destination: destination)
+            case .window(let point):
+                DispatchQueue.global(qos: .userInitiated).async {
+                    let result = self.captureWindowImage(at: point, destination: destination)
+                    DispatchQueue.main.async {
+                        self.finishCapture(result, destination: destination)
+                    }
                 }
             }
         }
         captureOverlayWindow?.makeKeyAndOrderFront(nil)
     }
 
-    private func captureScreen(rect: CGRect?, destination: URL) -> CaptureResult {
+    private func captureScreenImage(rect: CGRect?) -> ImageCaptureResult {
         let captureRect = rect ?? NSScreen.main?.frame ?? CGDisplayBounds(CGMainDisplayID())
         guard let displayID = displayID(containing: captureRect),
               let image = CGDisplayCreateImage(displayID) else {
@@ -599,7 +1175,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         guard let rect else {
-            return writePNG(image, to: destination)
+            return .success(image)
         }
 
         let displayBounds = CGDisplayBounds(displayID)
@@ -616,7 +1192,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return .failure("选区截图失败")
         }
 
-        return writePNG(croppedImage, to: destination)
+        return .success(croppedImage)
+    }
+
+    private func captureScreen(rect: CGRect?, destination: URL) -> CaptureResult {
+        switch captureScreenImage(rect: rect) {
+        case .success(let image):
+            return writePNG(image, to: destination)
+        case .failure(let message):
+            return .failure(message)
+        }
     }
 
     private func displayID(containing rect: CGRect) -> CGDirectDisplayID? {
@@ -688,7 +1273,50 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return .success
     }
 
-    private func finishCapture(_ result: CaptureResult, destination: URL) {
+    private func finishSelectionCapture(
+        _ imageResult: ImageCaptureResult,
+        action: SelectionCaptureAction,
+        destination: URL
+    ) {
+        switch imageResult {
+        case .failure(let message):
+            finishCapture(.failure(message), destination: destination)
+        case .success(let image):
+            switch action {
+            case .copy:
+                copyImageToPasteboard(image)
+                finishCapture(
+                    .success,
+                    destination: destination,
+                    successMessage: "已复制选区截图到粘贴板",
+                    copiesSavedImageOnSuccess: false
+                )
+            case .save:
+                let result = writePNG(image, to: destination)
+                finishCapture(
+                    result,
+                    destination: destination,
+                    successMessage: "已保存：\(destination.lastPathComponent)",
+                    copiesSavedImageOnSuccess: false
+                )
+            case .pin:
+                pinImage(image)
+                finishCapture(
+                    .success,
+                    destination: destination,
+                    successMessage: "已创建悬浮贴图，双击贴图可关闭",
+                    copiesSavedImageOnSuccess: false
+                )
+            }
+        }
+    }
+
+    private func finishCapture(
+        _ result: CaptureResult,
+        destination: URL,
+        successMessage: String? = nil,
+        copiesSavedImageOnSuccess: Bool = true
+    ) {
         if NSApp.isActive {
             window.makeKeyAndOrderFront(nil)
             NSApp.activate(ignoringOtherApps: true)
@@ -696,8 +1324,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         switch result {
         case .success:
-            copyImageToPasteboard(destination)
-            statusLabel.stringValue = "已保存并复制：\(destination.lastPathComponent)"
+            if copiesSavedImageOnSuccess {
+                copyImageToPasteboard(destination)
+            }
+            statusLabel.stringValue = successMessage ?? "已保存并复制：\(destination.lastPathComponent)"
             writeSelfTestResult("success \(destination.path)")
         case .failure(let message):
             statusLabel.stringValue = message
@@ -759,6 +1389,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let pasteboard = NSPasteboard.general
         pasteboard.clearContents()
         pasteboard.writeObjects([image])
+    }
+
+    private func copyImageToPasteboard(_ image: CGImage) {
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.writeObjects([NSImage(cgImage: image, size: CGSize(width: image.width, height: image.height))])
+    }
+
+    private func pinImage(_ image: CGImage) {
+        let pinWindow = FloatingPinWindow(image: image)
+        pinnedWindows.append(pinWindow)
+        NotificationCenter.default.addObserver(
+            forName: NSWindow.willCloseNotification,
+            object: pinWindow,
+            queue: .main
+        ) { [weak self, weak pinWindow] _ in
+            guard let pinWindow else { return }
+            self?.pinnedWindows.removeAll { $0 === pinWindow }
+        }
+        pinWindow.makeKeyAndOrderFront(nil)
     }
 
     private func createOutputDirectory() {
