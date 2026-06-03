@@ -2,6 +2,7 @@ import AppKit
 import Carbon
 import Foundation
 import ImageIO
+import ScreenCaptureKit
 import UniformTypeIdentifiers
 
 fileprivate enum AppIdentity {
@@ -36,6 +37,14 @@ enum InteractiveCaptureResult {
     case cancelled
     case selection(CGRect, SelectionCaptureAction)
     case window(CGPoint)
+}
+
+private struct CaptureFailure: LocalizedError {
+    let message: String
+
+    var errorDescription: String? {
+        message
+    }
 }
 
 final class CaptureOverlayWindow: NSWindow {
@@ -779,6 +788,17 @@ private enum ScreenCoordinates {
         )
     }
 
+    static func screenCaptureSourceRect(fromAppKitRect rect: CGRect) -> CGRect? {
+        guard let screen = screen(containingAppKitRect: rect),
+              let displayID = screen.displayID,
+              let quartzRect = quartzRect(fromAppKitRect: rect) else {
+            return nil
+        }
+
+        let displayBounds = CGDisplayBounds(displayID)
+        return quartzRect.offsetBy(dx: -displayBounds.minX, dy: -displayBounds.minY)
+    }
+
     static func pixelAlignedAppKitRect(_ rect: CGRect) -> CGRect {
         guard let screen = screen(containingAppKitRect: rect) else {
             return rect.integral
@@ -1284,10 +1304,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self.beginInteractiveCapture(mode: mode, destination: destination)
             }
         case .fullScreen:
-            DispatchQueue.global(qos: .userInitiated).async {
+            Task {
                 self.writeSelfTestResult("capture-started")
-                let result = self.captureScreen(rect: nil, destination: destination)
-                DispatchQueue.main.async {
+                let result = await self.captureScreen(rect: nil, destination: destination)
+                await MainActor.run {
                     self.finishCapture(result, destination: destination)
                 }
             }
@@ -1303,16 +1323,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             case .cancelled:
                 self.finishCapture(.failure("已取消截屏"), destination: destination)
             case .selection(let rect, let action):
-                DispatchQueue.global(qos: .userInitiated).async {
-                    let imageResult = self.captureScreenImage(rect: rect)
-                    DispatchQueue.main.async {
+                Task {
+                    let imageResult = await self.captureScreenImage(rect: rect)
+                    await MainActor.run {
                         self.finishSelectionCapture(imageResult, action: action, destination: destination)
                     }
                 }
             case .window(let point):
-                DispatchQueue.global(qos: .userInitiated).async {
-                    let result = self.captureWindowImage(at: point, destination: destination)
-                    DispatchQueue.main.async {
+                Task {
+                    let result = await self.captureWindowImage(at: point, destination: destination)
+                    await MainActor.run {
                         self.finishCapture(result, destination: destination)
                     }
                 }
@@ -1321,33 +1341,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         captureOverlayWindow?.makeKeyAndOrderFront(nil)
     }
 
-    private func captureScreenImage(rect: CGRect?) -> ImageCaptureResult {
-        guard let rect else {
-            let captureRect = NSScreen.main?.frame ?? CGDisplayBounds(CGMainDisplayID())
-            guard let screen = ScreenCoordinates.screen(containingAppKitRect: captureRect),
-                  let displayID = screen.displayID,
-                  let image = CGDisplayCreateImage(displayID) else {
-                return .failure("截屏失败，请检查“系统设置 > 隐私与安全性 > 屏幕与系统音频录制”权限")
-            }
-            return .success(image)
+    private func captureScreenImage(rect: CGRect?) async -> ImageCaptureResult {
+        do {
+            return .success(try await screenCaptureImage(rect: rect))
+        } catch {
+            requestScreenCaptureAccessIfNeeded(after: error)
+            return .failure(screenCaptureErrorMessage(error, fallback: rect == nil ? "全屏截图失败" : "选区截图失败"))
         }
-
-        let alignedRect = ScreenCoordinates.pixelAlignedAppKitRect(rect)
-        guard let quartzRect = ScreenCoordinates.quartzRect(fromAppKitRect: alignedRect),
-              let image = CGWindowListCreateImage(
-                quartzRect,
-                .optionOnScreenOnly,
-                kCGNullWindowID,
-                [.bestResolution]
-              ) else {
-            return .failure("选区截图失败")
-        }
-
-        return .success(image)
     }
 
-    private func captureScreen(rect: CGRect?, destination: URL) -> CaptureResult {
-        switch captureScreenImage(rect: rect) {
+    private func captureScreen(rect: CGRect?, destination: URL) async -> CaptureResult {
+        switch await captureScreenImage(rect: rect) {
         case .success(let image):
             return writePNG(image, to: destination)
         case .failure(let message):
@@ -1355,47 +1359,97 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    private func captureWindowImage(at point: CGPoint, destination: URL) -> CaptureResult {
-        guard let windowID = windowID(at: point),
-              let image = CGWindowListCreateImage(
-                .null,
-                .optionIncludingWindow,
-                windowID,
-                [.bestResolution, .boundsIgnoreFraming]
-              ) else {
-            return .failure("没有找到可截图的窗口")
+    private func captureWindowImage(at point: CGPoint, destination: URL) async -> CaptureResult {
+        do {
+            let image = try await screenCaptureWindowImage(at: point)
+            return writePNG(image, to: destination)
+        } catch {
+            requestScreenCaptureAccessIfNeeded(after: error)
+            return .failure(screenCaptureErrorMessage(error, fallback: "没有找到可截图的窗口"))
         }
-
-        return writePNG(image, to: destination)
     }
 
-    private func windowID(at point: CGPoint) -> CGWindowID? {
+    private func screenCaptureImage(rect: CGRect?) async throws -> CGImage {
+        let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
+        guard let screen = screenForCapture(rect: rect),
+              let displayID = screen.displayID,
+              let display = content.displays.first(where: { $0.displayID == displayID }) else {
+            throw CaptureFailure(message: "没有找到可截图的显示器")
+        }
+
+        let filter = SCContentFilter(display: display, excludingWindows: [])
+        let configuration = SCStreamConfiguration()
+        configuration.showsCursor = false
+
+        if let rect {
+            let alignedRect = ScreenCoordinates.pixelAlignedAppKitRect(rect)
+            guard let sourceRect = ScreenCoordinates.screenCaptureSourceRect(fromAppKitRect: alignedRect) else {
+                throw CaptureFailure(message: "选区坐标转换失败")
+            }
+            let scale = max(screen.backingScaleFactor, 1)
+            configuration.sourceRect = sourceRect
+            configuration.width = max(1, Int((alignedRect.width * scale).rounded()))
+            configuration.height = max(1, Int((alignedRect.height * scale).rounded()))
+        } else {
+            configuration.width = display.width
+            configuration.height = display.height
+        }
+
+        return try await SCScreenshotManager.captureImage(contentFilter: filter, configuration: configuration)
+    }
+
+    private func screenForCapture(rect: CGRect?) -> NSScreen? {
+        if let rect,
+           let screen = ScreenCoordinates.screen(containingAppKitRect: rect) {
+            return screen
+        }
+
+        return NSScreen.main ?? NSScreen.screens.first
+    }
+
+    private func screenCaptureWindowImage(at point: CGPoint) async throws -> CGImage {
         guard let quartzPoint = ScreenCoordinates.quartzPoint(fromAppKitPoint: point) else {
-            return nil
+            throw CaptureFailure(message: "窗口坐标转换失败")
         }
 
-        let options: CGWindowListOption = [.optionOnScreenOnly, .excludeDesktopElements]
-        guard let windowInfo = CGWindowListCopyWindowInfo(options, kCGNullWindowID) as? [[String: Any]] else {
-            return nil
+        let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
+        guard let window = content.windows.first(where: { window in
+            window.windowLayer == 0 &&
+                !AppIdentity.windowOwnerNamesToIgnore.contains(window.owningApplication?.applicationName ?? "") &&
+                window.frame.contains(quartzPoint)
+        }) else {
+            throw CaptureFailure(message: "没有找到可截图的窗口")
         }
 
-        for info in windowInfo {
-            guard let layer = info[kCGWindowLayer as String] as? Int,
-                  layer == 0,
-                  let ownerName = info[kCGWindowOwnerName as String] as? String,
-                  !AppIdentity.windowOwnerNamesToIgnore.contains(ownerName),
-                  let boundsDictionary = info[kCGWindowBounds as String] as? [String: Any],
-                  let windowNumber = info[kCGWindowNumber as String] as? UInt32 else {
-                continue
-            }
+        let filter = SCContentFilter(desktopIndependentWindow: window)
+        let configuration = SCStreamConfiguration()
+        let scale = ScreenCoordinates.screen(containingQuartzPoint: window.frame.center)?.backingScaleFactor ?? 1
+        configuration.showsCursor = false
+        configuration.width = max(1, Int((window.frame.width * scale).rounded()))
+        configuration.height = max(1, Int((window.frame.height * scale).rounded()))
 
-            let bounds = CGRect(dictionaryRepresentation: boundsDictionary as CFDictionary) ?? .zero
-            if bounds.contains(quartzPoint) {
-                return CGWindowID(windowNumber)
-            }
+        return try await SCScreenshotManager.captureImage(contentFilter: filter, configuration: configuration)
+    }
+
+    private func screenCaptureErrorMessage(_ error: Error, fallback: String) -> String {
+        if let captureFailure = error as? CaptureFailure {
+            return captureFailure.message
         }
 
-        return nil
+        let message = error.localizedDescription
+        if isScreenCaptureDenied(error) {
+            return "请在系统设置中允许 \(AppIdentity.appName)（\(AppIdentity.bundleIdentifier)）录制屏幕"
+        }
+
+        guard !message.isEmpty else { return fallback }
+        return "\(fallback)：\(message)"
+    }
+
+    private func isScreenCaptureDenied(_ error: Error) -> Bool {
+        let message = error.localizedDescription
+        return message.localizedCaseInsensitiveContains("TCC") ||
+            message.localizedCaseInsensitiveContains("denied") ||
+            message.localizedCaseInsensitiveContains("拒绝")
     }
 
     private func writePNG(_ image: CGImage, to destination: URL) -> CaptureResult {
@@ -1507,6 +1561,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         defaults.set(true, forKey: Self.screenCapturePermissionRequestedKey)
         CGRequestScreenCaptureAccess()
+    }
+
+    private func requestScreenCaptureAccessIfNeeded(after error: Error) {
+        guard isScreenCaptureDenied(error) else { return }
+
+        defaults.set(false, forKey: Self.screenCapturePermissionRequestedKey)
+        DispatchQueue.main.async {
+            self.requestScreenCaptureAccessIfNeeded()
+        }
     }
 
     private func hasScreenCaptureAccess() -> Bool {
@@ -1823,6 +1886,49 @@ private func hasScreenCaptureAccessForSelfTest() -> Bool {
     return image.width > 0 && image.height > 0
 }
 
+private final class SyncScreenCaptureBox: @unchecked Sendable {
+    var result: Result<CGImage, Error>?
+}
+
+private func screenCaptureKitDisplayImage(
+    displayID: CGDirectDisplayID,
+    sourceRect: CGRect?,
+    width: Int,
+    height: Int
+) -> Result<CGImage, Error> {
+    let box = SyncScreenCaptureBox()
+    let semaphore = DispatchSemaphore(value: 0)
+
+    Task.detached {
+        do {
+            let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
+            guard let display = content.displays.first(where: { $0.displayID == displayID }) else {
+                throw CaptureFailure(message: "self-test missing-display \(displayID)")
+            }
+
+            let filter = SCContentFilter(display: display, excludingWindows: [])
+            let configuration = SCStreamConfiguration()
+            configuration.showsCursor = false
+            configuration.width = max(1, width)
+            configuration.height = max(1, height)
+            if let sourceRect {
+                configuration.sourceRect = sourceRect
+            }
+
+            box.result = .success(try await SCScreenshotManager.captureImage(contentFilter: filter, configuration: configuration))
+        } catch {
+            box.result = .failure(error)
+        }
+        semaphore.signal()
+    }
+
+    while semaphore.wait(timeout: .now() + 0.05) == .timedOut {
+        RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.01))
+    }
+
+    return box.result ?? .failure(CaptureFailure(message: "self-test capture timed out"))
+}
+
 private func performCoordinateSelfTest(resultURL: URL?, includeContentCapture: Bool = true) {
     var lines: [String] = []
     let tolerance: CGFloat = 0.5
@@ -1860,6 +1966,7 @@ private func performCoordinateSelfTest(resultURL: URL?, includeContentCapture: B
 
             let alignedAppKitRect = ScreenCoordinates.pixelAlignedAppKitRect(appKitRect)
             guard let quartzRect = ScreenCoordinates.quartzRect(fromAppKitRect: alignedAppKitRect),
+                  let sourceRect = ScreenCoordinates.screenCaptureSourceRect(fromAppKitRect: alignedAppKitRect),
                   let roundTripRect = ScreenCoordinates.appKitRect(fromQuartzRect: quartzRect) else {
                 writeSelfTestResult("failure conversion-nil \(appKitRect)", to: resultURL)
                 return
@@ -1883,23 +1990,29 @@ private func performCoordinateSelfTest(resultURL: URL?, includeContentCapture: B
                 continue
             }
 
-            guard let image = CGWindowListCreateImage(
-                quartzRect,
-                .optionOnScreenOnly,
-                kCGNullWindowID,
-                [.bestResolution]
-            ) else {
+            let expectedWidth = alignedAppKitRect.width * screen.backingScaleFactor
+            let expectedHeight = alignedAppKitRect.height * screen.backingScaleFactor
+            let captureResult = screenCaptureKitDisplayImage(
+                displayID: displayID,
+                sourceRect: sourceRect,
+                width: Int(expectedWidth.rounded()),
+                height: Int(expectedHeight.rounded())
+            )
+            let image: CGImage
+            switch captureResult {
+            case .success(let capturedImage):
+                image = capturedImage
+            case .failure(let error):
+                lines.append("capture-error \(error.localizedDescription)")
                 writeSelfTestResult("failure capture-nil \(lines.joined(separator: "\n"))", to: resultURL)
                 return
             }
 
-            let expectedWidth = alignedAppKitRect.width * screen.backingScaleFactor
-            let expectedHeight = alignedAppKitRect.height * screen.backingScaleFactor
             let imageDelta = max(
                 abs(CGFloat(image.width) - expectedWidth),
                 abs(CGFloat(image.height) - expectedHeight)
             )
-            lines.append("capture image=\(image.width)x\(image.height) expected=\(expectedWidth)x\(expectedHeight) delta=\(imageDelta)")
+            lines.append("capture source=\(sourceRect) image=\(image.width)x\(image.height) expected=\(expectedWidth)x\(expectedHeight) delta=\(imageDelta)")
 
             if imageDelta > screen.backingScaleFactor {
                 writeSelfTestResult("failure capture-size \(lines.joined(separator: "\n"))", to: resultURL)
@@ -1967,14 +2080,26 @@ private func runSelectionContentSelfTest(lines: inout [String]) -> Bool {
     )
 
     let alignedSelectionRect = ScreenCoordinates.pixelAlignedAppKitRect(selectionRect)
-    guard let quartzRect = ScreenCoordinates.quartzRect(fromAppKitRect: alignedSelectionRect),
-          let image = CGWindowListCreateImage(
-            quartzRect,
-            .optionOnScreenOnly,
-            kCGNullWindowID,
-            [.bestResolution]
-          ) else {
+    guard let displayID = screen.displayID,
+          let quartzRect = ScreenCoordinates.quartzRect(fromAppKitRect: alignedSelectionRect),
+          let sourceRect = ScreenCoordinates.screenCaptureSourceRect(fromAppKitRect: alignedSelectionRect) else {
         lines.append("content-test capture-nil selection=\(selectionRect) aligned=\(alignedSelectionRect)")
+        return false
+    }
+
+    let scale = max(screen.backingScaleFactor, 1)
+    let captureResult = screenCaptureKitDisplayImage(
+        displayID: displayID,
+        sourceRect: sourceRect,
+        width: Int((alignedSelectionRect.width * scale).rounded()),
+        height: Int((alignedSelectionRect.height * scale).rounded())
+    )
+    let image: CGImage
+    switch captureResult {
+    case .success(let capturedImage):
+        image = capturedImage
+    case .failure(let error):
+        lines.append("content-test capture-error \(error.localizedDescription) selection=\(selectionRect) aligned=\(alignedSelectionRect)")
         return false
     }
 

@@ -5,7 +5,7 @@ MACOS_DIR := $(APP_DIR)/Contents/MacOS
 RESOURCES_DIR := $(APP_DIR)/Contents/Resources
 BINARY := $(MACOS_DIR)/AzpasteDev
 BUILD_STAMP := $(BUILD_DIR)/.app-built
-CODE_SIGN_KEYCHAIN := $(abspath $(BUILD_DIR)/AzpasteSigning.keychain)
+CODE_SIGN_KEYCHAIN := $(abspath .codex/AzpasteSigning.keychain)
 CODE_SIGN_KEYCHAIN_PASSWORD ?= azpaste-local-signing-password
 CODE_SIGN_IDENTITY ?= AzpasteLocalCodeSigning
 
@@ -18,9 +18,10 @@ $(BUILD_STAMP): Sources/Azpaste/main.swift Info.plist Makefile
 	rm -rf "$(APP_DIR)/Contents/_CodeSignature"
 	swiftc Sources/Azpaste/main.swift \
 		-o "$(BINARY)" \
-		-target arm64-apple-macos13.0 \
+		-target arm64-apple-macos14.0 \
 		-module-cache-path "$(BUILD_DIR)/ModuleCache" \
 		-framework AppKit \
+		-framework ScreenCaptureKit \
 		-Xlinker -sectcreate \
 		-Xlinker __TEXT \
 		-Xlinker __info_plist \
