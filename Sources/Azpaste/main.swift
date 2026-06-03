@@ -310,7 +310,6 @@ final class CaptureOverlayView: NSView {
             if mode == .selection {
                 drawHint("拖拽选择截图区域，靠近窗口或屏幕边缘可吸附，按 Esc 取消")
             }
-            drawMagnifierIfNeeded()
             return
         }
 
@@ -321,8 +320,6 @@ final class CaptureOverlayView: NSView {
         if state == .editing {
             drawToolbar(for: displayedSelectionRect)
         }
-
-        drawMagnifierIfNeeded()
     }
 
     private func drawMask() {
@@ -416,60 +413,6 @@ final class CaptureOverlayView: NSView {
             x += widths[index] + 6
         }
         toolbarButtons = buttons
-    }
-
-    private func drawMagnifierIfNeeded() {
-        guard mode == .selection,
-              let mouseLocation,
-              let screen = ScreenCoordinates.screen(containingAppKitPoint: globalPoint(from: mouseLocation)),
-              let displayID = screen.displayID,
-              let image = CGDisplayCreateImage(displayID) else {
-            return
-        }
-
-        let screenFrame = screen.frame
-        let scaleX = CGFloat(image.width) / screenFrame.width
-        let scaleY = CGFloat(image.height) / screenFrame.height
-        let global = globalPoint(from: mouseLocation)
-        let sampleSize: CGFloat = 28
-        let cropRect = CGRect(
-            x: (global.x - screenFrame.minX - sampleSize / 2) * scaleX,
-            y: (screenFrame.maxY - global.y - sampleSize / 2) * scaleY,
-            width: sampleSize * scaleX,
-            height: sampleSize * scaleY
-        ).integral.intersection(CGRect(x: 0, y: 0, width: CGFloat(image.width), height: CGFloat(image.height)))
-
-        guard let cropped = image.cropping(to: cropRect) else { return }
-
-        let magnifierSize: CGFloat = 116
-        let targetRect = placedRect(
-            preferred: CGRect(
-                x: mouseLocation.x + 18,
-                y: mouseLocation.y - magnifierSize - 18,
-                width: magnifierSize,
-                height: magnifierSize
-            ),
-            avoiding: selectionRect
-        )
-
-        guard let context = NSGraphicsContext.current?.cgContext else { return }
-        context.saveGState()
-        let clipPath = NSBezierPath(roundedRect: targetRect, xRadius: 8, yRadius: 8)
-        clipPath.addClip()
-        context.draw(cropped, in: targetRect)
-        context.restoreGState()
-
-        NSColor.white.withAlphaComponent(0.9).setStroke()
-        NSBezierPath(roundedRect: targetRect, xRadius: 8, yRadius: 8).stroke()
-
-        let crosshair = NSBezierPath()
-        crosshair.move(to: CGPoint(x: targetRect.midX, y: targetRect.minY))
-        crosshair.line(to: CGPoint(x: targetRect.midX, y: targetRect.maxY))
-        crosshair.move(to: CGPoint(x: targetRect.minX, y: targetRect.midY))
-        crosshair.line(to: CGPoint(x: targetRect.maxX, y: targetRect.midY))
-        crosshair.lineWidth = 1
-        NSColor.systemRed.withAlphaComponent(0.9).setStroke()
-        crosshair.stroke()
     }
 
     private func drawHint(_ text: String) {
