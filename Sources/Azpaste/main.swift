@@ -1566,23 +1566,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func requestScreenCaptureAccessIfNeeded(after error: Error) {
         guard isScreenCaptureDenied(error) else { return }
 
-        defaults.set(false, forKey: Self.screenCapturePermissionRequestedKey)
-        DispatchQueue.main.async {
-            self.requestScreenCaptureAccessIfNeeded()
-        }
+        defaults.set(true, forKey: Self.screenCapturePermissionRequestedKey)
+        statusLabel.stringValue = "请在系统设置中允许 \(AppIdentity.appName)（\(AppIdentity.bundleIdentifier)）录制屏幕"
     }
 
     private func hasScreenCaptureAccess() -> Bool {
-        if CGPreflightScreenCaptureAccess() {
-            return true
-        }
-
-        guard let displayID = NSScreen.main?.displayID ?? NSScreen.screens.first?.displayID,
-              let image = CGDisplayCreateImage(displayID) else {
-            return false
-        }
-
-        return image.width > 0 && image.height > 0
+        CGPreflightScreenCaptureAccess()
     }
 
     private func migrateDefaultsIfNeeded() {
@@ -1874,16 +1863,7 @@ private func commandLineSelfTestResultURL() -> URL? {
 }
 
 private func hasScreenCaptureAccessForSelfTest() -> Bool {
-    if CGPreflightScreenCaptureAccess() {
-        return true
-    }
-
-    guard let displayID = NSScreen.main?.displayID ?? NSScreen.screens.first?.displayID,
-          let image = CGDisplayCreateImage(displayID) else {
-        return false
-    }
-
-    return image.width > 0 && image.height > 0
+    CGPreflightScreenCaptureAccess()
 }
 
 private final class SyncScreenCaptureBox: @unchecked Sendable {
