@@ -1,9 +1,9 @@
-APP_NAME := Azpaste Dev
+APP_NAME := Azpaste
 BUILD_DIR := build
 APP_DIR := $(BUILD_DIR)/$(APP_NAME).app
 MACOS_DIR := $(APP_DIR)/Contents/MacOS
 RESOURCES_DIR := $(APP_DIR)/Contents/Resources
-BINARY := $(MACOS_DIR)/AzpasteDev
+BINARY := $(MACOS_DIR)/Azpaste
 BUILD_STAMP := $(BUILD_DIR)/.app-built
 CODE_SIGN_KEYCHAIN := $(abspath .codex/AzpasteSigning.keychain)
 CODE_SIGN_KEYCHAIN_PASSWORD ?= azpaste-local-signing-password

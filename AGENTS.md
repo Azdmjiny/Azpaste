@@ -91,7 +91,7 @@ make clean
 - 如果找不到 `AzpasteLocalCodeSigning`，构建会在签名步骤失败。
 - 签名 keychain 不放在 `build/` 下，因为 `make clean` 会删除整个 `build/` 目录，导致后续 `make app` 找不到签名身份。
 - 不要在每次 `make app` 时新建签名 keychain、证书或私钥；应该复用同一个 `.codex/AzpasteSigning.keychain` 和同一个 `AzpasteLocalCodeSigning` 身份。
-- 如果每次 `make app` 都生成新的签名文件/证书，即使 bundle id 仍然是 `com.azpaste.dev`，证书指纹也会变化，macOS TCC 可能会把它视为新的应用代码身份，屏幕录制权限大概率需要重新授权。
+- 如果每次 `make app` 都生成新的签名文件/证书，即使 bundle id 仍然是 `com.azpaste`，证书指纹也会变化，macOS TCC 可能会把它视为新的应用代码身份，屏幕录制权限大概率需要重新授权。
 - 如果需要使用自己的 Apple 开发者证书，可以在构建时传入 `CODE_SIGN_IDENTITY`：
 
 ```sh
@@ -127,8 +127,8 @@ codesign -dvvv build/Azpaste\ Dev.app
 严格验证应输出：
 
 ```text
-build/Azpaste Dev.app: valid on disk
-build/Azpaste Dev.app: satisfies its Designated Requirement
+build/Azpaste.app: valid on disk
+build/Azpaste.app: satisfies its Designated Requirement
 ```
 
 签名详情中应能看到类似：

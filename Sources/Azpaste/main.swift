@@ -6,8 +6,8 @@ import ScreenCaptureKit
 import UniformTypeIdentifiers
 
 fileprivate enum AppIdentity {
-    static let appName = "Azpaste Dev"
-    static let bundleIdentifier = "com.azpaste.dev"
+    static let appName = "Azpaste"
+    static let bundleIdentifier = "com.azpaste"
     static let windowOwnerNamesToIgnore = Set(["Azpaste", appName])
 }
 
@@ -929,11 +929,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private static let hotKeyCodeKey = "hotKeyCode"
     private static let hotKeyModifiersKey = "hotKeyModifiers"
     private static let screenCapturePermissionRequestedKey = "screenCapturePermissionRequested"
-    private static let defaultsMigrationKey = "didMigrateDefaultsFromAzpasteScreenshot"
-    private static let oldDefaultsSuiteName = "com.azpaste.screenshot"
+    private static let screenshotDefaultsMigrationKey = "didMigrateDefaultsFromAzpasteScreenshot"
+    private static let devDefaultsMigrationKey = "didMigrateDefaultsFromAzpasteDev"
+    private static let screenshotDefaultsSuiteName = "com.azpaste.screenshot"
+    private static let devDefaultsSuiteName = "com.azpaste.dev"
     private static let hotKeyID = UInt32(1)
     private static let defaultHotKeyCode = UInt32(kVK_ANSI_A)
     private static let defaultHotKeyModifiers = UInt32(controlKey | optionKey | cmdKey)
+    private static let migratedDefaultsKeys = [
+        outputDirectoryKey,
+        hotKeyEnabledKey,
+        hotKeyCodeKey,
+        hotKeyModifiersKey,
+        screenCapturePermissionRequestedKey
+    ]
     private static let hotKeySignature = OSType(
         UInt32(UInt8(ascii: "A")) << 24 |
         UInt32(UInt8(ascii: "Z")) << 16 |
@@ -971,7 +980,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
             return FileManager.default.homeDirectoryForCurrentUser
                 .appendingPathComponent("Desktop")
-                .appendingPathComponent("Azpaste Dev Screenshots")
+                .appendingPathComponent("Azpaste Screenshots")
         }
         set {
             defaults.set(newValue.path, forKey: Self.outputDirectoryKey)
@@ -1575,18 +1584,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func migrateDefaultsIfNeeded() {
-        guard !defaults.bool(forKey: Self.defaultsMigrationKey),
-              let oldDefaults = UserDefaults(suiteName: Self.oldDefaultsSuiteName) else {
+        migrateDefaults(
+            fromSuiteName: Self.screenshotDefaultsSuiteName,
+            migrationKey: Self.screenshotDefaultsMigrationKey
+        )
+        migrateDefaults(
+            fromSuiteName: Self.devDefaultsSuiteName,
+            migrationKey: Self.devDefaultsMigrationKey
+        )
+    }
+
+    private func migrateDefaults(fromSuiteName suiteName: String, migrationKey: String) {
+        guard !defaults.bool(forKey: migrationKey),
+              let oldDefaults = UserDefaults(suiteName: suiteName) else {
             return
         }
 
-        [
-            Self.outputDirectoryKey,
-            Self.hotKeyEnabledKey,
-            Self.hotKeyCodeKey,
-            Self.hotKeyModifiersKey,
-            Self.screenCapturePermissionRequestedKey
-        ].forEach { key in
+        Self.migratedDefaultsKeys.forEach { key in
             guard defaults.object(forKey: key) == nil,
                   let oldValue = oldDefaults.object(forKey: key) else {
                 return
@@ -1594,7 +1608,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             defaults.set(oldValue, forKey: key)
         }
 
-        defaults.set(true, forKey: Self.defaultsMigrationKey)
+        defaults.set(true, forKey: migrationKey)
     }
 
     private func copyImageToPasteboard(_ url: URL) {

@@ -5,15 +5,15 @@
     <key>CFBundleDevelopmentRegion</key>
     <string>zh_CN</string>
     <key>CFBundleExecutable</key>
-    <string>AzpasteDev</string>
+    <string>Azpaste</string>
     <key>CFBundleIdentifier</key>
-    <string>com.azpaste.dev</string>
+    <string>com.azpaste</string>
     <key>CFBundleDisplayName</key>
-    <string>Azpaste Dev</string>
+    <string>Azpaste</string>
     <key>CFBundleInfoDictionaryVersion</key>
     <string>6.0</string>
     <key>CFBundleName</key>
-    <string>Azpaste Dev</string>
+    <string>Azpaste</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
