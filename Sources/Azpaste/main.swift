@@ -99,9 +99,13 @@ final class CaptureOverlayView: NSView {
     }
 
     private struct ToolbarButton {
-        let title: String
         let action: SelectionCaptureAction
         let rect: CGRect
+    }
+
+    private struct ToolbarItem {
+        let action: SelectionCaptureAction
+        let iconName: String
     }
 
     private static let minSelectionSize: CGFloat = 4
@@ -110,6 +114,9 @@ final class CaptureOverlayView: NSView {
     private static let snapThreshold: CGFloat = 10
     private static let toolbarHeight: CGFloat = 34
     private static let toolbarPadding: CGFloat = 8
+    private static let toolbarButtonWidth: CGFloat = 34
+    private static let toolbarButtonSpacing: CGFloat = 6
+    private static let toolbarIconSize: CGFloat = 22
     private static let overlayDismissDelay: TimeInterval = 0.08
 
     private let mode: CaptureMode
@@ -122,6 +129,7 @@ final class CaptureOverlayView: NSView {
     private var selectionRect: CGRect?
     private var snapCandidateRect: CGRect?
     private var toolbarButtons: [ToolbarButton] = []
+    private var toolbarIconCache: [String: NSImage] = [:]
 
     init(mode: CaptureMode, completion: @escaping (InteractiveCaptureResult) -> Void) {
         self.mode = mode
@@ -374,22 +382,15 @@ final class CaptureOverlayView: NSView {
     }
 
     private func drawToolbar(for rect: CGRect) {
-        let titles: [(String, SelectionCaptureAction)] = [
-            ("复制到粘贴板", .copy),
-            ("保存到本地", .save),
-            ("悬浮贴图", .pin)
+        let items: [ToolbarItem] = [
+            ToolbarItem(action: .copy, iconName: "toolbar-copy"),
+            ToolbarItem(action: .save, iconName: "toolbar-save"),
+            ToolbarItem(action: .pin, iconName: "toolbar-pin")
         ]
-        let font = NSFont.systemFont(ofSize: 13, weight: .medium)
-        let attributes: [NSAttributedString.Key: Any] = [
-            .font: font,
-            .foregroundColor: NSColor.white
-        ]
-        var x: CGFloat = 0
         var buttons: [ToolbarButton] = []
-        let widths = titles.map { title, _ in
-            title.size(withAttributes: attributes).width + 22
-        }
-        let toolbarWidth = widths.reduce(0, +) + CGFloat(widths.count - 1) * 6 + Self.toolbarPadding * 2
+        let toolbarWidth = CGFloat(items.count) * Self.toolbarButtonWidth +
+            CGFloat(items.count - 1) * Self.toolbarButtonSpacing +
+            Self.toolbarPadding * 2
         let toolbarRect = placedRect(
             preferred: CGRect(
                 x: rect.minX,
@@ -403,16 +404,52 @@ final class CaptureOverlayView: NSView {
         NSColor.black.withAlphaComponent(0.78).setFill()
         NSBezierPath(roundedRect: toolbarRect, xRadius: 6, yRadius: 6).fill()
 
-        x = toolbarRect.minX + Self.toolbarPadding
-        for (index, item) in titles.enumerated() {
-            let buttonRect = CGRect(x: x, y: toolbarRect.minY + 5, width: widths[index], height: Self.toolbarHeight - 10)
-            NSColor.controlAccentColor.withAlphaComponent(0.85).setFill()
+        var x = toolbarRect.minX + Self.toolbarPadding
+        for item in items {
+            let buttonRect = CGRect(
+                x: x,
+                y: toolbarRect.minY + 5,
+                width: Self.toolbarButtonWidth,
+                height: Self.toolbarHeight - 10
+            )
+            NSColor.white.withAlphaComponent(0.12).setFill()
             NSBezierPath(roundedRect: buttonRect, xRadius: 5, yRadius: 5).fill()
-            item.0.draw(in: buttonRect.insetBy(dx: 11, dy: 3), withAttributes: attributes)
-            buttons.append(ToolbarButton(title: item.0, action: item.1, rect: buttonRect))
-            x += widths[index] + 6
+            if let image = toolbarIcon(named: item.iconName) {
+                drawToolbarIcon(image, in: buttonRect)
+            }
+            buttons.append(ToolbarButton(action: item.action, rect: buttonRect))
+            x += Self.toolbarButtonWidth + Self.toolbarButtonSpacing
         }
         toolbarButtons = buttons
+    }
+
+    private func toolbarIcon(named name: String) -> NSImage? {
+        if let icon = toolbarIconCache[name] {
+            return icon
+        }
+
+        guard let url = Bundle.main.url(
+            forResource: name,
+            withExtension: "png",
+            subdirectory: "ToolbarIcons"
+        ),
+              let icon = NSImage(contentsOf: url) else {
+            return nil
+        }
+
+        toolbarIconCache[name] = icon
+        return icon
+    }
+
+    private func drawToolbarIcon(_ image: NSImage, in buttonRect: CGRect) {
+        let side = Self.toolbarIconSize
+        let iconRect = CGRect(
+            x: buttonRect.midX - side / 2,
+            y: buttonRect.midY - side / 2,
+            width: side,
+            height: side
+        )
+        image.draw(in: iconRect, from: .zero, operation: .sourceOver, fraction: 1)
     }
 
     private func drawHint(_ text: String) {
