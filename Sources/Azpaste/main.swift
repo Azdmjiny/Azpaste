@@ -383,9 +383,9 @@ final class CaptureOverlayView: NSView {
 
     private func drawToolbar(for rect: CGRect) {
         let items: [ToolbarItem] = [
-            ToolbarItem(action: .copy, iconName: "toolbar-copy"),
-            ToolbarItem(action: .save, iconName: "toolbar-save"),
-            ToolbarItem(action: .pin, iconName: "toolbar-pin")
+            ToolbarItem(action: .copy, iconName: "toolbar-copy-transparent"),
+            ToolbarItem(action: .save, iconName: "toolbar-save-transparent"),
+            ToolbarItem(action: .pin, iconName: "toolbar-pin-transparent")
         ]
         var buttons: [ToolbarButton] = []
         let toolbarWidth = CGFloat(items.count) * Self.toolbarButtonWidth +
