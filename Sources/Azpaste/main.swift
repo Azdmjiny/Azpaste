@@ -915,6 +915,59 @@ final class FloatingPinImageView: NSImageView {
         case topRight
         case bottomRight
         case bottomLeft
+
+        var cursor: NSCursor {
+            switch self {
+            case .topLeft, .bottomRight:
+                return Self.topLeftBottomRightCursor
+            case .topRight, .bottomLeft:
+                return Self.topRightBottomLeftCursor
+            }
+        }
+
+        private static let topLeftBottomRightCursor = diagonalResizeCursor(
+            from: CGPoint(x: 4, y: 16),
+            to: CGPoint(x: 16, y: 4)
+        )
+        private static let topRightBottomLeftCursor = diagonalResizeCursor(
+            from: CGPoint(x: 4, y: 4),
+            to: CGPoint(x: 16, y: 16)
+        )
+
+        private static func diagonalResizeCursor(from start: CGPoint, to end: CGPoint) -> NSCursor {
+            let imageSize = CGSize(width: 20, height: 20)
+            let image = NSImage(size: imageSize)
+            image.lockFocus()
+
+            drawDiagonalArrow(from: start, to: end, color: .white, lineWidth: 4)
+            drawDiagonalArrow(from: start, to: end, color: .black, lineWidth: 2)
+
+            image.unlockFocus()
+            return NSCursor(image: image, hotSpot: CGPoint(x: imageSize.width / 2, y: imageSize.height / 2))
+        }
+
+        private static func drawDiagonalArrow(from start: CGPoint, to end: CGPoint, color: NSColor, lineWidth: CGFloat) {
+            let path = NSBezierPath()
+            path.lineCapStyle = .round
+            path.lineJoinStyle = .round
+            path.lineWidth = lineWidth
+            path.move(to: start)
+            path.line(to: end)
+
+            for (tip, away) in [(start, end), (end, start)] {
+                let direction = CGVector(dx: tip.x - away.x, dy: tip.y - away.y)
+                let length = max(hypot(direction.dx, direction.dy), 1)
+                let unit = CGVector(dx: direction.dx / length, dy: direction.dy / length)
+                let perpendicular = CGVector(dx: -unit.dy, dy: unit.dx)
+                let base = CGPoint(x: tip.x - unit.dx * 5, y: tip.y - unit.dy * 5)
+                path.move(to: CGPoint(x: base.x + perpendicular.dx * 3, y: base.y + perpendicular.dy * 3))
+                path.line(to: tip)
+                path.line(to: CGPoint(x: base.x - perpendicular.dx * 3, y: base.y - perpendicular.dy * 3))
+            }
+
+            color.setStroke()
+            path.stroke()
+        }
     }
 
     private struct ResizeState {
@@ -953,6 +1006,7 @@ final class FloatingPinImageView: NSImageView {
                 originalFrame: window.frame,
                 oppositeAnchor: oppositeAnchor(for: edge, in: window.frame)
             )
+            edge.cursor.set()
         } else {
             window?.performDrag(with: event)
         }
@@ -966,6 +1020,7 @@ final class FloatingPinImageView: NSImageView {
         }
 
         let pointer = window.convertPoint(toScreen: event.locationInWindow)
+        resizeState.edge.cursor.set()
         window.setFrame(
             resizedFrame(from: resizeState.originalFrame, edge: resizeState.edge, anchor: resizeState.oppositeAnchor, pointer: pointer),
             display: true
@@ -974,6 +1029,7 @@ final class FloatingPinImageView: NSImageView {
 
     override func mouseUp(with event: NSEvent) {
         resizeState = nil
+        cursor(for: convert(event.locationInWindow, from: nil)).set()
         super.mouseUp(with: event)
     }
 
@@ -1010,6 +1066,10 @@ final class FloatingPinImageView: NSImageView {
         default:
             return nil
         }
+    }
+
+    private func cursor(for point: CGPoint) -> NSCursor {
+        resizeEdge(at: point)?.cursor ?? .arrow
     }
 
     private func oppositeAnchor(for edge: ResizeEdge, in frame: CGRect) -> CGPoint {
@@ -1071,12 +1131,23 @@ final class FloatingPinImageView: NSImageView {
 
     private func addCursorRects(for rect: CGRect) {
         let thickness = Self.resizeHitThickness
-        let cursor = NSCursor.resizeLeftRight
 
-        addCursorRect(CGRect(x: rect.minX, y: rect.maxY - thickness, width: thickness, height: thickness), cursor: cursor)
-        addCursorRect(CGRect(x: rect.maxX - thickness, y: rect.maxY - thickness, width: thickness, height: thickness), cursor: cursor)
-        addCursorRect(CGRect(x: rect.maxX - thickness, y: rect.minY, width: thickness, height: thickness), cursor: cursor)
-        addCursorRect(CGRect(x: rect.minX, y: rect.minY, width: thickness, height: thickness), cursor: cursor)
+        addCursorRect(
+            CGRect(x: rect.minX, y: rect.maxY - thickness, width: thickness, height: thickness),
+            cursor: ResizeEdge.topLeft.cursor
+        )
+        addCursorRect(
+            CGRect(x: rect.maxX - thickness, y: rect.maxY - thickness, width: thickness, height: thickness),
+            cursor: ResizeEdge.topRight.cursor
+        )
+        addCursorRect(
+            CGRect(x: rect.maxX - thickness, y: rect.minY, width: thickness, height: thickness),
+            cursor: ResizeEdge.bottomRight.cursor
+        )
+        addCursorRect(
+            CGRect(x: rect.minX, y: rect.minY, width: thickness, height: thickness),
+            cursor: ResizeEdge.bottomLeft.cursor
+        )
     }
 }
 
