@@ -912,13 +912,9 @@ final class FloatingPinWindow: NSWindow {
 final class FloatingPinImageView: NSImageView {
     private enum ResizeEdge {
         case topLeft
-        case top
         case topRight
-        case right
         case bottomRight
-        case bottom
         case bottomLeft
-        case left
     }
 
     private struct ResizeState {
@@ -1011,14 +1007,6 @@ final class FloatingPinImageView: NSImageView {
             return .bottomRight
         case (true, _, _, true):
             return .bottomLeft
-        case (true, _, _, _):
-            return .left
-        case (_, true, _, _):
-            return .right
-        case (_, _, true, _):
-            return .top
-        case (_, _, _, true):
-            return .bottom
         default:
             return nil
         }
@@ -1028,20 +1016,12 @@ final class FloatingPinImageView: NSImageView {
         switch edge {
         case .topLeft:
             return CGPoint(x: frame.maxX, y: frame.minY)
-        case .top:
-            return CGPoint(x: frame.midX, y: frame.minY)
         case .topRight:
             return CGPoint(x: frame.minX, y: frame.minY)
-        case .right:
-            return CGPoint(x: frame.minX, y: frame.midY)
         case .bottomRight:
             return CGPoint(x: frame.minX, y: frame.maxY)
-        case .bottom:
-            return CGPoint(x: frame.midX, y: frame.maxY)
         case .bottomLeft:
             return CGPoint(x: frame.maxX, y: frame.maxY)
-        case .left:
-            return CGPoint(x: frame.maxX, y: frame.midY)
         }
     }
 
@@ -1051,29 +1031,17 @@ final class FloatingPinImageView: NSImageView {
         switch edge {
         case .topLeft:
             return CGRect(x: anchor.x - size.width, y: anchor.y, width: size.width, height: size.height)
-        case .top:
-            return CGRect(x: originalFrame.midX - size.width / 2, y: anchor.y, width: size.width, height: size.height)
         case .topRight:
             return CGRect(x: anchor.x, y: anchor.y, width: size.width, height: size.height)
-        case .right:
-            return CGRect(x: anchor.x, y: originalFrame.midY - size.height / 2, width: size.width, height: size.height)
         case .bottomRight:
             return CGRect(x: anchor.x, y: anchor.y - size.height, width: size.width, height: size.height)
-        case .bottom:
-            return CGRect(x: originalFrame.midX - size.width / 2, y: anchor.y - size.height, width: size.width, height: size.height)
         case .bottomLeft:
             return CGRect(x: anchor.x - size.width, y: anchor.y - size.height, width: size.width, height: size.height)
-        case .left:
-            return CGRect(x: anchor.x - size.width, y: originalFrame.midY - size.height / 2, width: size.width, height: size.height)
         }
     }
 
     private func proposedSize(for edge: ResizeEdge, anchor: CGPoint, pointer: CGPoint) -> CGSize {
         switch edge {
-        case .left, .right:
-            return size(forWidth: abs(pointer.x - anchor.x))
-        case .top, .bottom:
-            return size(forHeight: abs(pointer.y - anchor.y))
         case .topLeft, .topRight, .bottomRight, .bottomLeft:
             let width = abs(pointer.x - anchor.x)
             let height = abs(pointer.y - anchor.y)
@@ -1103,13 +1071,12 @@ final class FloatingPinImageView: NSImageView {
 
     private func addCursorRects(for rect: CGRect) {
         let thickness = Self.resizeHitThickness
-        let verticalCursor = NSCursor.resizeLeftRight
-        let horizontalCursor = NSCursor.resizeUpDown
+        let cursor = NSCursor.resizeLeftRight
 
-        addCursorRect(CGRect(x: rect.minX, y: rect.minY, width: thickness, height: rect.height), cursor: verticalCursor)
-        addCursorRect(CGRect(x: rect.maxX - thickness, y: rect.minY, width: thickness, height: rect.height), cursor: verticalCursor)
-        addCursorRect(CGRect(x: rect.minX, y: rect.maxY - thickness, width: rect.width, height: thickness), cursor: horizontalCursor)
-        addCursorRect(CGRect(x: rect.minX, y: rect.minY, width: rect.width, height: thickness), cursor: horizontalCursor)
+        addCursorRect(CGRect(x: rect.minX, y: rect.maxY - thickness, width: thickness, height: thickness), cursor: cursor)
+        addCursorRect(CGRect(x: rect.maxX - thickness, y: rect.maxY - thickness, width: thickness, height: thickness), cursor: cursor)
+        addCursorRect(CGRect(x: rect.maxX - thickness, y: rect.minY, width: thickness, height: thickness), cursor: cursor)
+        addCursorRect(CGRect(x: rect.minX, y: rect.minY, width: thickness, height: thickness), cursor: cursor)
     }
 }
 
