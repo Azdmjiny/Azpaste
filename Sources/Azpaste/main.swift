@@ -383,9 +383,9 @@ final class CaptureOverlayView: NSView {
 
     private func drawToolbar(for rect: CGRect) {
         let items: [ToolbarItem] = [
-            ToolbarItem(action: .copy, iconName: "toolbar-copy-transparent"),
-            ToolbarItem(action: .save, iconName: "toolbar-save-transparent"),
-            ToolbarItem(action: .pin, iconName: "toolbar-pin-transparent")
+            ToolbarItem(action: .copy, iconName: "toolbar-copy"),
+            ToolbarItem(action: .save, iconName: "toolbar-save"),
+            ToolbarItem(action: .pin, iconName: "toolbar-pin")
         ]
         var buttons: [ToolbarButton] = []
         let toolbarWidth = CGFloat(items.count) * Self.toolbarButtonWidth +
@@ -842,11 +842,23 @@ private final class CoordinateSelfTestView: NSView {
 }
 
 final class FloatingPinWindow: NSWindow {
+    private static let minPinSideLength: CGFloat = 96
+    private static let maxVisibleFrameScale: CGFloat = 0.92
+
+    private let pinAspectRatio: CGFloat
+    private let maximumPinSize: CGSize
+
     init(image: CGImage) {
         let imageSize = CGSize(width: image.width, height: image.height)
+        pinAspectRatio = imageSize.width / imageSize.height
+
         let screen = NSScreen.main ?? NSScreen.screens.first
         let visibleFrame = screen?.visibleFrame ?? CGRect(x: 0, y: 0, width: 900, height: 700)
         let maxSize = CGSize(width: visibleFrame.width * 0.72, height: visibleFrame.height * 0.72)
+        maximumPinSize = CGSize(
+            width: visibleFrame.width * Self.maxVisibleFrameScale,
+            height: visibleFrame.height * Self.maxVisibleFrameScale
+        )
         let scale = min(1, maxSize.width / imageSize.width, maxSize.height / imageSize.height)
         let windowSize = CGSize(width: imageSize.width * scale, height: imageSize.height * scale)
         let frame = CGRect(
@@ -856,7 +868,12 @@ final class FloatingPinWindow: NSWindow {
             height: windowSize.height
         )
 
-        let imageView = DoubleClickImageView(frame: CGRect(origin: .zero, size: windowSize))
+        let imageView = FloatingPinImageView(
+            frame: CGRect(origin: .zero, size: windowSize),
+            aspectRatio: pinAspectRatio,
+            minSize: Self.minimumSize(forAspectRatio: pinAspectRatio),
+            maxSize: maximumPinSize
+        )
         imageView.image = NSImage(cgImage: image, size: imageSize)
         imageView.imageScaling = .scaleProportionallyUpOrDown
 
@@ -873,6 +890,8 @@ final class FloatingPinWindow: NSWindow {
         collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         isMovableByWindowBackground = true
         hasShadow = true
+        minSize = Self.minimumSize(forAspectRatio: pinAspectRatio)
+        self.maxSize = maximumPinSize
         imageView.closeHandler = { [weak self] in
             self?.close()
         }
@@ -881,17 +900,90 @@ final class FloatingPinWindow: NSWindow {
     override var canBecomeKey: Bool {
         true
     }
+
+    private static func minimumSize(forAspectRatio aspectRatio: CGFloat) -> CGSize {
+        if aspectRatio >= 1 {
+            return CGSize(width: minPinSideLength, height: minPinSideLength / aspectRatio)
+        }
+        return CGSize(width: minPinSideLength * aspectRatio, height: minPinSideLength)
+    }
 }
 
-final class DoubleClickImageView: NSImageView {
+final class FloatingPinImageView: NSImageView {
+    private enum ResizeEdge {
+        case topLeft
+        case top
+        case topRight
+        case right
+        case bottomRight
+        case bottom
+        case bottomLeft
+        case left
+    }
+
+    private struct ResizeState {
+        let edge: ResizeEdge
+        let originalFrame: CGRect
+        let oppositeAnchor: CGPoint
+    }
+
+    private static let resizeHitThickness: CGFloat = 10
+
     var closeHandler: (() -> Void)?
+    private let aspectRatio: CGFloat
+    private let minSize: CGSize
+    private let maxSize: CGSize
+    private var resizeState: ResizeState?
+
+    init(frame frameRect: NSRect, aspectRatio: CGFloat, minSize: CGSize, maxSize: CGSize) {
+        self.aspectRatio = aspectRatio
+        self.minSize = minSize
+        self.maxSize = maxSize
+        super.init(frame: frameRect)
+        postsFrameChangedNotifications = true
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
 
     override func mouseDown(with event: NSEvent) {
         if event.clickCount >= 2 {
             closeHandler?()
+        } else if let window,
+                  let edge = resizeEdge(at: convert(event.locationInWindow, from: nil)) {
+            resizeState = ResizeState(
+                edge: edge,
+                originalFrame: window.frame,
+                oppositeAnchor: oppositeAnchor(for: edge, in: window.frame)
+            )
         } else {
             window?.performDrag(with: event)
         }
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        guard let window,
+              let resizeState else {
+            super.mouseDragged(with: event)
+            return
+        }
+
+        let pointer = window.convertPoint(toScreen: event.locationInWindow)
+        window.setFrame(
+            resizedFrame(from: resizeState.originalFrame, edge: resizeState.edge, anchor: resizeState.oppositeAnchor, pointer: pointer),
+            display: true
+        )
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        resizeState = nil
+        super.mouseUp(with: event)
+    }
+
+    override func resetCursorRects() {
+        super.resetCursorRects()
+        addCursorRects(for: bounds)
     }
 
     override func keyDown(with event: NSEvent) {
@@ -900,6 +992,124 @@ final class DoubleClickImageView: NSImageView {
         } else {
             super.keyDown(with: event)
         }
+    }
+
+    private func resizeEdge(at point: CGPoint) -> ResizeEdge? {
+        guard bounds.contains(point) else { return nil }
+
+        let nearLeft = point.x <= bounds.minX + Self.resizeHitThickness
+        let nearRight = point.x >= bounds.maxX - Self.resizeHitThickness
+        let nearBottom = point.y <= bounds.minY + Self.resizeHitThickness
+        let nearTop = point.y >= bounds.maxY - Self.resizeHitThickness
+
+        switch (nearLeft, nearRight, nearTop, nearBottom) {
+        case (true, _, true, _):
+            return .topLeft
+        case (_, true, true, _):
+            return .topRight
+        case (_, true, _, true):
+            return .bottomRight
+        case (true, _, _, true):
+            return .bottomLeft
+        case (true, _, _, _):
+            return .left
+        case (_, true, _, _):
+            return .right
+        case (_, _, true, _):
+            return .top
+        case (_, _, _, true):
+            return .bottom
+        default:
+            return nil
+        }
+    }
+
+    private func oppositeAnchor(for edge: ResizeEdge, in frame: CGRect) -> CGPoint {
+        switch edge {
+        case .topLeft:
+            return CGPoint(x: frame.maxX, y: frame.minY)
+        case .top:
+            return CGPoint(x: frame.midX, y: frame.minY)
+        case .topRight:
+            return CGPoint(x: frame.minX, y: frame.minY)
+        case .right:
+            return CGPoint(x: frame.minX, y: frame.midY)
+        case .bottomRight:
+            return CGPoint(x: frame.minX, y: frame.maxY)
+        case .bottom:
+            return CGPoint(x: frame.midX, y: frame.maxY)
+        case .bottomLeft:
+            return CGPoint(x: frame.maxX, y: frame.maxY)
+        case .left:
+            return CGPoint(x: frame.maxX, y: frame.midY)
+        }
+    }
+
+    private func resizedFrame(from originalFrame: CGRect, edge: ResizeEdge, anchor: CGPoint, pointer: CGPoint) -> CGRect {
+        let size = constrainedSize(proposedSize(for: edge, anchor: anchor, pointer: pointer))
+
+        switch edge {
+        case .topLeft:
+            return CGRect(x: anchor.x - size.width, y: anchor.y, width: size.width, height: size.height)
+        case .top:
+            return CGRect(x: originalFrame.midX - size.width / 2, y: anchor.y, width: size.width, height: size.height)
+        case .topRight:
+            return CGRect(x: anchor.x, y: anchor.y, width: size.width, height: size.height)
+        case .right:
+            return CGRect(x: anchor.x, y: originalFrame.midY - size.height / 2, width: size.width, height: size.height)
+        case .bottomRight:
+            return CGRect(x: anchor.x, y: anchor.y - size.height, width: size.width, height: size.height)
+        case .bottom:
+            return CGRect(x: originalFrame.midX - size.width / 2, y: anchor.y - size.height, width: size.width, height: size.height)
+        case .bottomLeft:
+            return CGRect(x: anchor.x - size.width, y: anchor.y - size.height, width: size.width, height: size.height)
+        case .left:
+            return CGRect(x: anchor.x - size.width, y: originalFrame.midY - size.height / 2, width: size.width, height: size.height)
+        }
+    }
+
+    private func proposedSize(for edge: ResizeEdge, anchor: CGPoint, pointer: CGPoint) -> CGSize {
+        switch edge {
+        case .left, .right:
+            return size(forWidth: abs(pointer.x - anchor.x))
+        case .top, .bottom:
+            return size(forHeight: abs(pointer.y - anchor.y))
+        case .topLeft, .topRight, .bottomRight, .bottomLeft:
+            let width = abs(pointer.x - anchor.x)
+            let height = abs(pointer.y - anchor.y)
+            if width / max(height, 1) > aspectRatio {
+                return size(forWidth: width)
+            }
+            return size(forHeight: height)
+        }
+    }
+
+    private func size(forWidth width: CGFloat) -> CGSize {
+        let constrainedWidth = max(width, 1)
+        return CGSize(width: constrainedWidth, height: constrainedWidth / aspectRatio)
+    }
+
+    private func size(forHeight height: CGFloat) -> CGSize {
+        let constrainedHeight = max(height, 1)
+        return CGSize(width: constrainedHeight * aspectRatio, height: constrainedHeight)
+    }
+
+    private func constrainedSize(_ proposed: CGSize) -> CGSize {
+        let minScale = max(minSize.width / proposed.width, minSize.height / proposed.height, 1)
+        let maxScale = min(maxSize.width / proposed.width, maxSize.height / proposed.height, 1)
+        let scale = minScale > 1 ? minScale : maxScale
+        return CGSize(width: proposed.width * scale, height: proposed.height * scale)
+    }
+
+    private func addCursorRects(for rect: CGRect) {
+        let thickness = Self.resizeHitThickness
+        let verticalCursor = NSCursor.resizeLeftRight
+        let horizontalCursor = NSCursor.resizeUpDown
+
+        addCursorRect(CGRect(x: rect.minX, y: rect.minY, width: thickness, height: rect.height), cursor: verticalCursor)
+        addCursorRect(CGRect(x: rect.maxX - thickness, y: rect.minY, width: thickness, height: rect.height), cursor: verticalCursor)
+        addCursorRect(CGRect(x: rect.minX, y: rect.maxY - thickness, width: rect.width, height: thickness), cursor: horizontalCursor)
+        addCursorRect(CGRect(x: rect.minX, y: rect.minY, width: rect.width, height: thickness), cursor: horizontalCursor)
     }
 }
 
