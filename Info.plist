@@ -6,6 +6,8 @@
     <string>zh_CN</string>
     <key>CFBundleExecutable</key>
     <string>Azpaste</string>
+    <key>CFBundleIconFile</key>
+    <string>Azpaste</string>
     <key>CFBundleIdentifier</key>
     <string>com.azpaste</string>
     <key>CFBundleDisplayName</key>

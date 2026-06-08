@@ -989,11 +989,21 @@ final class FloatingPinImageView: NSImageView {
         self.minSize = minSize
         self.maxSize = maxSize
         super.init(frame: frameRect)
+        allowedTouchTypes = [.indirect]
         postsFrameChangedNotifications = true
     }
 
     required init?(coder: NSCoder) {
         fatalError("init(coder:) has not been implemented")
+    }
+
+    override var acceptsFirstResponder: Bool {
+        true
+    }
+
+    override func viewDidMoveToWindow() {
+        window?.makeFirstResponder(self)
+        window?.invalidateCursorRects(for: self)
     }
 
     override func mouseDown(with event: NSEvent) {
@@ -1031,6 +1041,10 @@ final class FloatingPinImageView: NSImageView {
         resizeState = nil
         cursor(for: convert(event.locationInWindow, from: nil)).set()
         super.mouseUp(with: event)
+    }
+
+    override func magnify(with event: NSEvent) {
+        applyMagnification(event.magnification)
     }
 
     override func resetCursorRects() {
@@ -1098,6 +1112,25 @@ final class FloatingPinImageView: NSImageView {
         case .bottomLeft:
             return CGRect(x: anchor.x - size.width, y: anchor.y - size.height, width: size.width, height: size.height)
         }
+    }
+
+    private func centeredFrame(from frame: CGRect, size: CGSize) -> CGRect {
+        CGRect(
+            x: frame.midX - size.width / 2,
+            y: frame.midY - size.height / 2,
+            width: size.width,
+            height: size.height
+        )
+    }
+
+    fileprivate func applyMagnification(_ magnification: CGFloat) {
+        guard let window else { return }
+
+        let scale = max(0.1, 1 + magnification)
+        let currentSize = window.frame.size
+        let proposedSize = CGSize(width: currentSize.width * scale, height: currentSize.height * scale)
+        let size = constrainedSize(proposedSize)
+        window.setFrame(centeredFrame(from: window.frame, size: size), display: true)
     }
 
     private func proposedSize(for edge: ResizeEdge, anchor: CGPoint, pointer: CGPoint) -> CGSize {
@@ -1189,6 +1222,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let shouldCaptureFullScreenOnLaunch = CommandLine.arguments.contains("--capture-fullscreen-on-launch")
     private let shouldQuitAfterCapture = CommandLine.arguments.contains("--quit-after-capture")
     private let shouldRunCoordinateSelfTest = CommandLine.arguments.contains("--self-test-coordinates")
+    private let shouldRunFloatingPinResizeSelfTest = CommandLine.arguments.contains("--self-test-floating-pin-resize")
     private let selfTestResultURL: URL? = {
         guard let index = CommandLine.arguments.firstIndex(of: "--self-test-result"),
               CommandLine.arguments.indices.contains(index + 1) else {
@@ -1253,6 +1287,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         if shouldRunCoordinateSelfTest {
             runCoordinateSelfTest()
+            exit(EXIT_SUCCESS)
+        }
+        if shouldRunFloatingPinResizeSelfTest {
+            performFloatingPinResizeSelfTest(resultURL: selfTestResultURL)
             exit(EXIT_SUCCESS)
         }
 
@@ -2104,6 +2142,115 @@ private func commandLineSelfTestResultURL() -> URL? {
     return URL(fileURLWithPath: CommandLine.arguments[index + 1])
 }
 
+private func performFloatingPinResizeSelfTest(resultURL: URL?) {
+    guard let image = makeSelfTestImage(width: 400, height: 240) else {
+        writeSelfTestResult("failure floating-pin missing-image", to: resultURL)
+        return
+    }
+
+    let window = FloatingPinWindow(image: image)
+    window.orderFrontRegardless()
+    window.makeKey()
+    RunLoop.current.run(until: Date().addingTimeInterval(0.1))
+
+    defer {
+        window.orderOut(nil)
+        window.close()
+    }
+
+    guard let imageView = window.contentView as? FloatingPinImageView else {
+        writeSelfTestResult("failure floating-pin missing-image-view", to: resultURL)
+        return
+    }
+
+    let originalFrame = window.frame
+    let originalCenter = originalFrame.center
+    let expectedAspectRatio = originalFrame.width / originalFrame.height
+
+    let firstResponderMatches = window.firstResponder === imageView
+    let acceptsIndirectTouch = imageView.allowedTouchTypes.contains(.indirect)
+
+    imageView.applyMagnification(0.25)
+    RunLoop.current.run(until: Date().addingTimeInterval(0.05))
+
+    let resizedFrame = window.frame
+    let resizedCenter = resizedFrame.center
+    let resizedAspectRatio = resizedFrame.width / resizedFrame.height
+    let centerDelta = hypot(resizedCenter.x - originalCenter.x, resizedCenter.y - originalCenter.y)
+    let aspectDelta = abs(resizedAspectRatio - expectedAspectRatio)
+    let aspectTolerance = max(0.01, 2 / max(1, min(resizedFrame.width, resizedFrame.height)))
+    let grew = resizedFrame.width > originalFrame.width && resizedFrame.height > originalFrame.height
+
+    imageView.applyMagnification(-0.2)
+    RunLoop.current.run(until: Date().addingTimeInterval(0.05))
+    let shrunkFrame = window.frame
+    let shrunkCenter = shrunkFrame.center
+    let shrinkCenterDelta = hypot(shrunkCenter.x - originalCenter.x, shrunkCenter.y - originalCenter.y)
+    let shrunk = shrunkFrame.width < resizedFrame.width && shrunkFrame.height < resizedFrame.height
+
+    let lines = [
+        "firstResponderMatches=\(firstResponderMatches)",
+        "acceptsIndirectTouch=\(acceptsIndirectTouch)",
+        "original=\(originalFrame)",
+        "resized=\(resizedFrame)",
+        "shrunk=\(shrunkFrame)",
+        "centerDelta=\(centerDelta)",
+        "shrinkCenterDelta=\(shrinkCenterDelta)",
+        "aspectDelta=\(aspectDelta)",
+        "aspectTolerance=\(aspectTolerance)",
+        "grew=\(grew)"
+    ]
+
+    guard firstResponderMatches else {
+        writeSelfTestResult("failure floating-pin first-responder\n\(lines.joined(separator: "\n"))", to: resultURL)
+        return
+    }
+    guard acceptsIndirectTouch else {
+        writeSelfTestResult("failure floating-pin indirect-touch\n\(lines.joined(separator: "\n"))", to: resultURL)
+        return
+    }
+    guard grew else {
+        writeSelfTestResult("failure floating-pin did-not-grow\n\(lines.joined(separator: "\n"))", to: resultURL)
+        return
+    }
+    guard shrunk else {
+        writeSelfTestResult("failure floating-pin did-not-shrink\n\(lines.joined(separator: "\n"))", to: resultURL)
+        return
+    }
+    guard centerDelta <= 0.5 else {
+        writeSelfTestResult("failure floating-pin center-shift\n\(lines.joined(separator: "\n"))", to: resultURL)
+        return
+    }
+    guard shrinkCenterDelta <= 0.5 else {
+        writeSelfTestResult("failure floating-pin shrink-center-shift\n\(lines.joined(separator: "\n"))", to: resultURL)
+        return
+    }
+    guard aspectDelta <= aspectTolerance else {
+        writeSelfTestResult("failure floating-pin aspect\n\(lines.joined(separator: "\n"))", to: resultURL)
+        return
+    }
+
+    writeSelfTestResult("success floating-pin-resize\n\(lines.joined(separator: "\n"))", to: resultURL)
+}
+
+private func makeSelfTestImage(width: Int, height: Int) -> CGImage? {
+    guard let context = CGContext(
+        data: nil,
+        width: width,
+        height: height,
+        bitsPerComponent: 8,
+        bytesPerRow: width * 4,
+        space: CGColorSpaceCreateDeviceRGB(),
+        bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+    ) else {
+        return nil
+    }
+
+    context.setFillColor(NSColor.systemBlue.cgColor)
+    context.fill(CGRect(x: 0, y: 0, width: width, height: height))
+    return context.makeImage()
+}
+
 private func hasScreenCaptureAccessForSelfTest() -> Bool {
     CGPreflightScreenCaptureAccess()
 }
@@ -2364,6 +2511,12 @@ if CommandLine.arguments.contains("--self-test-coordinates"),
    Bundle.main.bundleURL.pathExtension != "app" {
     _ = NSApplication.shared
     performCoordinateSelfTest(resultURL: commandLineSelfTestResultURL(), includeContentCapture: false)
+    exit(EXIT_SUCCESS)
+}
+if CommandLine.arguments.contains("--self-test-floating-pin-resize"),
+   Bundle.main.bundleURL.pathExtension != "app" {
+    _ = NSApplication.shared
+    performFloatingPinResizeSelfTest(resultURL: commandLineSelfTestResultURL())
     exit(EXIT_SUCCESS)
 }
 

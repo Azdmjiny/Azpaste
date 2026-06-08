@@ -5,6 +5,8 @@ MACOS_DIR := $(APP_DIR)/Contents/MacOS
 RESOURCES_DIR := $(APP_DIR)/Contents/Resources
 BINARY := $(MACOS_DIR)/Azpaste
 BUILD_STAMP := $(BUILD_DIR)/.app-built
+APP_ICON_SOURCE := Resources/app.png
+APP_ICON_FILE := Azpaste.icns
 RESOURCE_FILES := \
 	Resources/ToolbarIcons/toolbar-copy.png \
 	Resources/ToolbarIcons/toolbar-save.png \
@@ -17,7 +19,7 @@ CODE_SIGN_IDENTITY ?= AzpasteLocalCodeSigning
 
 app: $(BUILD_STAMP)
 
-$(BUILD_STAMP): Sources/Azpaste/main.swift Info.plist Makefile $(RESOURCE_FILES)
+$(BUILD_STAMP): Sources/Azpaste/main.swift Info.plist Makefile Scripts/make_icns.swift $(RESOURCE_FILES) $(APP_ICON_SOURCE)
 	mkdir -p "$(MACOS_DIR)" "$(RESOURCES_DIR)" "$(BUILD_DIR)/ModuleCache"
 	rm -rf "$(APP_DIR)/Contents/_CodeSignature"
 	swiftc Sources/Azpaste/main.swift \
@@ -34,6 +36,7 @@ $(BUILD_STAMP): Sources/Azpaste/main.swift Info.plist Makefile $(RESOURCE_FILES)
 	rm -rf "$(RESOURCES_DIR)/ToolbarIcons"
 	mkdir -p "$(RESOURCES_DIR)/ToolbarIcons"
 	cp $(RESOURCE_FILES) "$(RESOURCES_DIR)/ToolbarIcons/"
+	swift -module-cache-path "$(BUILD_DIR)/ModuleCache" Scripts/make_icns.swift "$(APP_ICON_SOURCE)" "$(RESOURCES_DIR)/$(APP_ICON_FILE)"
 	printf "APPL????" > "$(APP_DIR)/Contents/PkgInfo"
 	if [ -f "$(CODE_SIGN_KEYCHAIN)" ]; then \
 		security unlock-keychain -p "$(CODE_SIGN_KEYCHAIN_PASSWORD)" "$(CODE_SIGN_KEYCHAIN)"; \
