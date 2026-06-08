@@ -18,6 +18,8 @@ let entries: [IconEntry] = [
     IconEntry(type: "ic10", size: 1024),
 ]
 
+let cornerRadiusRatio: CGFloat = 0.09
+
 func fail(_ message: String) -> Never {
     FileHandle.standardError.write(Data((message + "\n").utf8))
     exit(1)
@@ -77,6 +79,16 @@ func pngData(for size: Int) -> Data {
         width: drawWidth,
         height: drawHeight
     )
+
+    let cornerRadius = min(drawRect.width, drawRect.height) * cornerRadiusRatio
+    let clipPath = CGPath(
+        roundedRect: drawRect,
+        cornerWidth: cornerRadius,
+        cornerHeight: cornerRadius,
+        transform: nil
+    )
+    context.addPath(clipPath)
+    context.clip()
 
     context.draw(sourceImage, in: drawRect)
 
